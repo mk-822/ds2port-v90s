@@ -1,0 +1,17 @@
+{
+  "wine": {
+    "file": "wine10.tar.xz",
+    "url": "https://github.com/Kron4ek/Wine-Builds/releases/download/10.0/wine-10.0-amd64-wow64.tar.xz",
+    "sha256": "aeebbbf239e548f0136f1cd72a2e109dd9a572a8f703da3c09fa40d74d5c255f"
+  },
+  "box64": {
+    "file": "box64.deb",
+    "url": "https://github.com/Pi-Apps-Coders/box64-debs/raw/master/debian/box64-generic-arm_0.4.5%2B20261022T110837.fbba162-1_arm64.deb",
+    "sha256": "70b9c9491d96229f80e06824d2d1ae2c1e49d4d3b67785bad78e849f207882ba"
+  },
+  "adlmidi": {
+    "file": "adlmidi-source.tar.gz",
+    "url": "https://github.com/Wohlstand/libADLMIDI/archive/refs/tags/v1.5.1.tar.gz",
+    "sha256": "98b5a9c1c8bd8f6715c3440ff6a1913420fe96ebdd5607ff11e42ac998801c41"
+  }
+}

@@ -1,0 +1,3 @@
+#include <windows.h>
+#include <stdio.h>
+int main(void){HDC dc=CreateCompatibleDC(0);int widths[]={-8,7,6,0};for(int i=0;i<4;i++){HFONT f=CreateFontA(-22,widths[i],0,0,700,0,0,0,SHIFTJIS_CHARSET,0,0,0,0,"MS Gothic");HGDIOBJ old=SelectObject(dc,f);TEXTMETRICA tm;SIZE size;char name[256];GetTextMetricsA(dc,&tm);GetTextFaceA(dc,sizeof(name),name);GetTextExtentPoint32A(dc,"\x91\xbe",2,&size);printf("WIDTH %d %s h=%ld internal=%ld avg=%ld max=%ld jp=%ld\n",widths[i],name,tm.tmHeight,tm.tmInternalLeading,tm.tmAveCharWidth,tm.tmMaxCharWidth,size.cx);SelectObject(dc,old);DeleteObject(f);}fflush(stdout);return 0;}

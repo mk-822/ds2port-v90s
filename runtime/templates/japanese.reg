@@ -1,0 +1,22 @@
+REGEDIT4
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\Nls\CodePage]
+"ACP"="932"
+"OEMCP"="932"
+"MACCP"="10001"
+
+[HKEY_CURRENT_USER\Control Panel\International]
+"Locale"="00000411"
+"LocaleName"="ja-JP"
+
+[HKEY_CURRENT_USER\Software\Wine\Fonts\Replacements]
+"MS Gothic"=-
+"MS PGothic"=-
+"MS UI Gothic"=-
+
+[HKEY_CURRENT_USER\Software\Wine\Direct3D]
+"renderer"="gdi"
+
+[HKEY_CURRENT_USER\Software\Wine\X11 Driver]
+"Managed"="N"
+"Decorated"="N"

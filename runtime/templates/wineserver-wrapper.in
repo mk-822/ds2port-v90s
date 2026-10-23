@@ -1,0 +1,2 @@
+#!/bin/sh
+exec @@PORT@@/runtime/box64 @@RUNTIME@@/wine-10.0-amd64-wow64/bin/wineserver "$@"

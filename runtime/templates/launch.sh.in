@@ -1,0 +1,69 @@
+#!/bin/sh
+set -u
+P=@@PORT@@
+. "$P/env.sh"
+if [ "${1:-}" = --check ]; then
+ for f in "$P/game/@@EXE@@" "$W/bin/wine" "$P/runtime/box64" "$R/native/bin/Xvfb" "$R/native/bin/fbbridge" "$R/native/bin/sb16-synth" "$P/assets/fonts/msgothic.ttc"; do
+  [ -f "$f" ] || { echo "Missing: $f"; exit 1; }
+ done
+ echo 'DS2PORT_RUNTIME_OK'
+ exit 0
+fi
+lock=/run/plumos/ds2port-display93.lock
+mkdir "$lock" 2>/dev/null || { echo 'Another DS2Port game is running'; exit 1; }
+xpid=;spid=;bpid=;gpid=
+cleanup(){
+ trap - EXIT HUP INT TERM
+ timeout 5 "$R/wineserver-wrapper" -k >/dev/null 2>&1 || true
+ for pid in "$gpid" "$bpid" "$spid" "$xpid"; do
+  [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+ done
+ rm -f "$R/game.pid" "$R/bridge.pid" "$R/synth.pid" "$R/xvfb.pid"
+ rmdir "$lock" 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 0' HUP INT TERM
+mkdir -p "$P/logs" || exit 1
+# Append avoids deleting FAT chains on every start; logs can be exported from SSH.
+exec >> "$P/logs/launch.log" 2>&1
+echo "DS2Port launch $(date -u)"
+if [ -S /tmp/.X11-unix/X93 ]; then echo 'Display 93 is already in use'; exit 1; fi
+unset LD_PRELOAD SDL_HQ_SCALER SDL_ROTATION SDL_BLITTER_DISABLED
+/mnt/plumos/bin/plumos-audio-output prepare || true
+mkdir -p /tmp/.X11-unix
+ln -sfn "$R/native/bin" /tmp/j3b
+Xvfb :93 -screen 0 640x480x24 -xkbdir "$XKB_CONFIG_ROOT" -ac -nolisten tcp -noreset >> "$P/logs/xvfb.log" 2>&1 &
+xpid=$!; echo "$xpid" > "$R/xvfb.pid"
+ready=0
+for i in $(seq 1 10); do
+ if timeout 3 xwininfo -root >/dev/null 2>&1; then ready=1; break; fi
+ sleep 1
+done
+[ "$ready" = 1 ] || { echo 'Xvfb failed'; exit 1; }
+mkdir -p "$WINEPREFIX/drive_c/windows/Fonts"
+cp "$P/assets/fonts/msgothic.ttc" "$WINEPREFIX/drive_c/windows/Fonts/msgothic.ttc"
+if [ ! -f "$R/prefix-configured-v1" ]; then
+ if [ ! -f "$WINEPREFIX/system.reg" ]; then
+  wine_run wineboot.exe --init >> "$P/logs/prefix.log" 2>&1 || true
+ fi
+ timeout 10 "$R/wineserver-wrapper" -k >/dev/null 2>&1 || true
+ timeout 10 "$R/wineserver-wrapper" -w >/dev/null 2>&1 || { echo 'Wine initialization did not stop'; exit 1; }
+ python3 "$P/configure_prefix.py" "$WINEPREFIX" >> "$P/logs/prefix.log" 2>&1 || { echo 'Japanese prefix setup failed'; exit 1; }
+ touch "$R/prefix-configured-v1"
+fi
+backend=$(cat "$P/midi-backend" 2>/dev/null || echo opl3)
+if [ "$backend" = soundfont ]; then
+ midisynth "$P/assets/TimGM6mb.sf2" >> "$P/logs/midi.log" 2>&1 &
+else
+ sb16-synth >> "$P/logs/midi.log" 2>&1 &
+fi
+spid=$!; echo "$spid" > "$R/synth.pid"
+sleep 1
+kill -0 "$spid" 2>/dev/null || { echo 'MIDI synth failed'; exit 1; }
+cd "$P/game"
+wine_run @@EXE@@ >> "$P/logs/game.log" 2>&1 &
+gpid=$!; echo "$gpid" > "$R/game.pid"
+fbbridge >> "$P/logs/framebuffer.log" 2>&1 &
+bpid=$!; echo "$bpid" > "$R/bridge.pid"
+while kill -0 "$gpid" 2>/dev/null && kill -0 "$bpid" 2>/dev/null; do sleep 1; done
+echo "DS2Port stopped $(date -u)"
