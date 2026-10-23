@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -39,6 +40,39 @@ def same_tree(source, destination):
         return result
     expected = entries(source)
     return expected is not None and expected == entries(destination)
+
+
+def share_wine_files(source, candidates):
+    """Share immutable Wine binaries only; game data and prefixes stay private.
+
+    Managed runtime upgrades replace files/directories, never edit shared
+    binaries in place. An old installation therefore retains its own version.
+    """
+    count=0
+    candidates=[p for p in candidates if p.is_dir() and not p.is_symlink()]
+    for dest in source.rglob('*'):
+        if dest.is_symlink() or not dest.is_file():continue
+        relative=dest.relative_to(source)
+        current=dest.stat();expected=None
+        for root in candidates:
+            other=root/relative
+            if other.is_symlink() or not other.is_file() or not other.resolve().is_relative_to(root.resolve()):continue
+            previous=other.stat()
+            properties=lambda s:(s.st_dev,s.st_size,stat.S_IMODE(s.st_mode),s.st_uid,s.st_gid)
+            if properties(current)!=properties(previous):continue
+            if current.st_ino==previous.st_ino:break
+            if expected is None:expected=sha(dest)
+            if sha(other)!=expected:continue
+            temporary=dest.with_name(dest.name+'.ds2port-link')
+            if temporary.exists() or temporary.is_symlink():continue
+            try:
+                os.link(other,temporary)
+                os.replace(temporary,dest)
+            except OSError:
+                temporary.unlink(missing_ok=True)
+                continue
+            count+=1;break
+    return count
 
 
 def safe_extract(archive, destination):
@@ -144,6 +178,12 @@ def main(config_path):
                 print('既存ランタイムを再利用: ' + name, flush=True)
                 shutil.rmtree(runtime / name)
                 continue
+            if name=='wine-10.0-amd64-wow64':
+                candidates=[other/name for other in sorted(r.parent.iterdir())
+                            if other!=r and not other.is_symlink()
+                            and (p.parent/other.name/'ds2port-installed.json').is_file()]
+                linked=share_wine_files(runtime/name,candidates)
+                print('他のゲームと同一のWineファイルを共有: '+str(linked),flush=True)
             old = backup / name if dest.exists() else None
             if old:
                 os.replace(dest, old)

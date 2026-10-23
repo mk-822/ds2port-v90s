@@ -109,9 +109,18 @@ def prepare_payload(source, font, profile, port_id, output, input_mode="mouse"):
 def inspect_device(connection):
     script = """import json,os,platform,shutil
 roots=['/mnt/plumos/roms/ports','/mnt/plumos']
-print(json.dumps({'arch':platform.machine(),'uid':os.geteuid(),'plumos':os.path.isfile('/mnt/plumos/bin/plumos-portmaster-port-launch'),'roots':{p:{'free':shutil.disk_usage(p).free,'readonly':bool(os.statvfs(p).f_flag & os.ST_RDONLY)} for p in roots}}))
+from pathlib import Path
+prefix_bytes={p.parent.name:sum(f.stat().st_size for f in p.rglob('*') if f.is_file() and not f.is_symlink()) for p in Path('/mnt/plumos/ports-runtime').glob('*/prefix')}
+print(json.dumps({'arch':platform.machine(),'uid':os.geteuid(),'plumos':os.path.isfile('/mnt/plumos/bin/plumos-portmaster-port-launch'),'prefix_bytes':prefix_bytes,'roots':{p:{'free':shutil.disk_usage(p).free,'readonly':bool(os.statvfs(p).f_flag & os.ST_RDONLY)} for p in roots}}))
 """
     return json.loads(connection.run("python3 -c " + shlex.quote(script)))
+
+
+def required_ext4_bytes(unpacked, archive_bytes, game_bytes, existing_prefix_bytes=0):
+    # Wineboot creates ~565 MiB on this runtime. Reserve it before transfer,
+    # including the missing part of an initialization interrupted by ENOSPC.
+    prefix_growth=max(0,640*1024**2-existing_prefix_bytes)
+    return unpacked+archive_bytes+game_bytes*3+prefix_growth+128*1024**2
 
 
 def install(connection, source, runtime, profile, font=None, port_id=None, log=print, progress=lambda value: None, input_mode="mouse"):
@@ -127,8 +136,9 @@ def install(connection, source, runtime, profile, font=None, port_id=None, log=p
         raise ValueError("本体の保存領域が読み取り専用です。転送を中止しました。")
     unpacked = metadata["unpacked_bytes"]
     game_size = sum(p.stat().st_size for p in Path(source).rglob("*") if p.is_file())
-    if status["roots"]["/mnt/plumos"]["free"] < unpacked + Path(runtime).stat().st_size + game_size * 3 + 128 * 1024**2:
-        raise ValueError("ext4領域の空き容量が不足しています。")
+    needed=required_ext4_bytes(unpacked,Path(runtime).stat().st_size,game_size,status.get('prefix_bytes',{}).get(port_id,0))
+    if status["roots"]["/mnt/plumos"]["free"] < needed:
+        raise ValueError(f"ext4領域の空き容量が不足しています。転送一時領域とWine初回起動分を含め、約{needed/1024**3:.2f}GiB必要です。")
     if status["roots"]["/mnt/plumos/roms/ports"]["free"] < game_size * 2 + 32 * 1024**2:
         raise ValueError("共有領域の空き容量が不足しています。")
     with tempfile.TemporaryDirectory(prefix="ds2port-") as tmp:

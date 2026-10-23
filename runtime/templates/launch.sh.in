@@ -9,6 +9,16 @@ if [ "${1:-}" = --check ]; then
  echo 'DS2PORT_RUNTIME_OK'
  exit 0
 fi
+# Keep the OS cache/registry writable, including Wineboot's first-run growth.
+python3 - "$R" <<'PY' || exit 1
+from pathlib import Path
+import shutil,sys
+runtime=Path(sys.argv[1]);prefix=runtime/'prefix'
+existing=sum(p.stat().st_size for p in prefix.rglob('*') if not p.is_symlink() and p.is_file()) if prefix.exists() else 0
+needed=max(0,640*1024**2-existing)+128*1024**2
+if shutil.disk_usage(runtime).free<needed:
+    sys.exit('Insufficient ext4 space for Wine startup; need %.0f MiB free.'%(needed/1024**2))
+PY
 lock=/run/plumos/ds2port-display93.lock
 mkdir "$lock" 2>/dev/null || { echo 'Another DS2Port game is running'; exit 1; }
 xpid=;spid=;bpid=;gpid=

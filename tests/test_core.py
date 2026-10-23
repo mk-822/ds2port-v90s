@@ -7,7 +7,7 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
-from ds2port.installer import prepare_payload, render_template, validate_bundle
+from ds2port.installer import prepare_payload, render_template, validate_bundle, required_ext4_bytes
 from ds2port.profiles import digest, game_executable, patch_executable, profiles, detect_game, Win32Image, patch_common
 from ds2port.resources import root
 
@@ -45,7 +45,7 @@ class PrefixConfiguration(unittest.TestCase):
         self.assertIn('"Other"="Keep Font"',result)
 
 
-class ArchiveSafety(unittest.TestCase):
+class RuntimeReuse(unittest.TestCase):
     def test_identical_runtime_tree_can_be_reused(self):
         with tempfile.TemporaryDirectory() as temp:
             source, destination = Path(temp)/'source', Path(temp)/'destination'
@@ -56,6 +56,54 @@ class ArchiveSafety(unittest.TestCase):
             (destination/'wine').write_bytes(b'old runtime')
             self.assertFalse(remote.same_tree(source, destination))
 
+
+class RuntimeSharing(unittest.TestCase):
+    def test_identical_wine_files_share_but_atomic_upgrade_is_private(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old,new=Path(temp)/'old',Path(temp)/'new'
+            old.mkdir();new.mkdir()
+            (old/'wine').write_bytes(b'same binary')
+            (new/'wine').write_bytes(b'same binary')
+            self.assertEqual(remote.share_wine_files(new,[old]),1)
+            self.assertTrue(os.path.samefile(old/'wine',new/'wine'))
+            (new/'update').write_bytes(b'new binary')
+            (new/'update').replace(new/'wine')
+            self.assertEqual((old/'wine').read_bytes(),b'same binary')
+            self.assertEqual((new/'wine').read_bytes(),b'new binary')
+
+    def test_different_contents_or_modes_are_not_shared(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old,new=Path(temp)/'old',Path(temp)/'new'
+            old.mkdir();new.mkdir()
+            for root in (old,new):
+                (root/'contents').write_bytes(b'old' if root==old else b'new')
+                (root/'mode').write_bytes(b'same')
+            (old/'mode').chmod(0o444)
+            try:
+                self.assertEqual(remote.share_wine_files(new,[old]),0)
+                self.assertFalse(os.path.samefile(old/'mode',new/'mode'))
+                self.assertEqual((new/'contents').read_bytes(),b'new')
+            finally:(old/'mode').chmod(0o666)
+
+    @unittest.skipIf(os.name=='nt','symlink creation requires Windows privilege')
+    def test_candidate_link_cannot_escape_its_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old,new,outside=(Path(temp)/n for n in ('old','new','outside'))
+            for root in (old,new,outside):root.mkdir()
+            (new/'sub').mkdir();(new/'sub/file').write_bytes(b'same')
+            (outside/'file').write_bytes(b'same')
+            (old/'sub').symlink_to(outside,target_is_directory=True)
+            self.assertEqual(remote.share_wine_files(new,[old]),0)
+            self.assertFalse(os.path.samefile(outside/'file',new/'sub/file'))
+
+    def test_first_run_and_partial_prefix_growth_are_reserved(self):
+        mib=1024**2
+        base=required_ext4_bytes(700*mib,170*mib,10*mib,640*mib)
+        self.assertEqual(required_ext4_bytes(700*mib,170*mib,10*mib),base+640*mib)
+        self.assertEqual(required_ext4_bytes(700*mib,170*mib,10*mib,400*mib),base+240*mib)
+
+
+class ArchiveSafety(unittest.TestCase):
     def test_runtime_tree_with_extra_files_is_not_reused(self):
         with tempfile.TemporaryDirectory() as temp:
             source, destination = Path(temp)/'source', Path(temp)/'destination'
@@ -209,7 +257,7 @@ class Profiles(unittest.TestCase):
     def test_runtime_bundle_contains_no_game_or_windows_font(self):
         path=root()/"bld/runtime.tar.gz"
         _,metadata=validate_bundle(path)
-        forbidden={"jump3.exe","jump3.original.exe","float.exe","float.original.exe","msgothic.ttc"}
+        forbidden={"jump3.exe","jump3.original.exe","float.exe","float.original.exe","ac_mon.exe","ac_mon.original.exe","msgothic.ttc"}
         self.assertFalse(any(Path(name).name.casefold() in forbidden for name in metadata["files"]))
         self.assertIn("native/bin/sb16-synth",metadata["files"])
 
