@@ -1,6 +1,7 @@
 from pathlib import Path
-import hashlib,importlib.metadata,json,shutil,sys,zipfile
+import hashlib,importlib.metadata,json,shutil,sys,zipfile,tomllib
 root=Path(__file__).resolve().parents[1]
+version=tomllib.loads((root/'pyproject.toml').read_text(encoding='utf-8'))['project']['version']
 folder=root/'bld/dist/DS2PortV90S'
 for name in ('README.md','THIRD_PARTY.md','LICENSE','NOTICE'):
     shutil.copyfile(root/name,folder/name)
@@ -23,11 +24,11 @@ for source in (Path(sys.base_prefix)/'tcl').rglob('license.terms'):
     target=folder/'licenses/tcl-tk'/(source.parent.name+'-license.txt')
     target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,target)
 (folder/'python-packages.json').write_text(json.dumps(versions,indent=2))
-for forbidden in ('msgothic.ttc','JUMP3.EXE','JUMP3.original.exe','FLOAT.EXE','FLOAT.original.exe','ac_mon.exe','ac_mon.original.exe','known_hosts','.env'):
+for forbidden in ('msgothic.ttc','JUMP3.EXE','JUMP3.original.exe','FLOAT.EXE','FLOAT.original.exe','ac_mon.exe','ac_mon.original.exe','DF3.exe','DF3.original.exe','known_hosts','.env'):
     if any(p.name.casefold()==forbidden.casefold() for p in folder.rglob('*')):raise SystemExit('Private file in release')
 items={p.relative_to(folder).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in folder.rglob('*') if p.is_file() and p.name!='checksums.json'}
 (folder/'checksums.json').write_text(json.dumps(items,indent=2))
-with zipfile.ZipFile(root/'bld/dist/ds2port-v90s-0.1.0-windows-x64.zip','w',zipfile.ZIP_DEFLATED) as z:
+with zipfile.ZipFile(root/('bld/dist/ds2port-v90s-'+version+'-windows-x64.zip'),'w',zipfile.ZIP_DEFLATED) as z:
     for path in sorted(folder.rglob('*')):
         if path.is_file():z.write(path,path.relative_to(folder.parent))
 print('RELEASE_PACKAGE_READY',flush=True)

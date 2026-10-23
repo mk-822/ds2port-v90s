@@ -4,8 +4,10 @@
   "launcher": "JUMPHERO Gaiden 3",
   "executable": "JUMP3.EXE",
   "original_sha256": "5bcd248a7cb713bc2dfb6f12b2c10af8ce0c12c0abf30984d13565e0fcc5c799",
-  "patched_sha256": "3f4097097bfad5aeea27726b707db4d1d730b64a8bd593d8766100078a3924f9",
-  "patch": "jump3-ms-gothic-thread-mouse-v1",
-  "preserve": ["SaveData"],
+  "patched_sha256": "9a51bfaab8cf9dbf43946f990ce88245f5af5a687a50973b16889bcc3e169d8e",
+  "patch": "jump3-ms-gothic-common-v2",
+  "preserve": [
+    "SaveData"
+  ],
   "status": "タイトル・本編会話・音声・操作をPlumOS V90S V2で確認"
 }

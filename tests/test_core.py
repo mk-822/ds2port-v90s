@@ -157,6 +157,8 @@ class Profiles(unittest.TestCase):
         struct.pack_into('<H', image, 0x94, 224)
         struct.pack_into('<H', image, 0x98, 0x10b)
         struct.pack_into('<I', image, 0x98 + 28, base)
+        struct.pack_into('<II',image,0x98+32,0x1000,0x200)
+        struct.pack_into('<II',image,0x98+56,0x2000,0x200)
         struct.pack_into('<I', image, 0x98 + 104, 0x1100)
         section = 0x98 + 224
         struct.pack_into('<IIII', image, section + 8, 0x200, 0x1000, 0x400, 0x200)
@@ -178,15 +180,113 @@ class Profiles(unittest.TestCase):
         self.assertEqual(original[0x249:0x24f], patched[0x249:0x24f])
         self.assertEqual(patch_common(patched), patched)
 
+    def test_shared_font_initializer_patch_is_specific_and_idempotent(self):
+        image=bytearray(self.common_fixture())
+        struct.pack_into('<IIII',image,0x340,0x1190,0x11b0,0x11d0,0)
+        image[0x3b2:0x3be]=b'CreateFontA\0'
+        image[0x3d2:0x3e2]=b'GetTextMetricsA\0'
+        code=b'\xff\x15'+struct.pack('<I',0x601164)
+        code+=b'\x68'+struct.pack('<I',0x601300)+b'\x50\xff\x15'+struct.pack('<I',0x601168)
+        code+=b'\x8b\x0d'+struct.pack('<I',0x601300)+b'\x8b\x15'+struct.pack('<I',0x601318)+bytes.fromhex('66 89 56 02')
+        image[0x280:0x280+len(code)]=code
+        original=bytes(image);patched=patch_common(original)
+        self.assertEqual(len(Win32Image(patched).sections),2)
+        self.assertEqual(patched[0x280:0x286],original[0x280:0x286])
+        narrowed=patch_common(original,90)
+        self.assertEqual(narrowed[0x280],0xe8)
+        self.assertEqual(patch_common(narrowed,90),narrowed)
+        self.assertEqual(patched[0x28c],0xe8)
+        self.assertEqual(patch_common(patched),patched)
+        # A different destination field is not the legacy packed-font layout.
+        image[0x280+len(code)-1]=4
+        ignored=patch_common(bytes(image))
+        self.assertEqual(ignored[0x28c:0x292],bytes(image[0x28c:0x292]))
+
     def test_common_patch_ignores_callback_outside_code(self):
         original = self.common_fixture(callback=0x9000)
         self.assertEqual(patch_common(original), original)
 
-    def test_common_patch_refuses_used_padding(self):
+    def test_common_patch_adds_section_and_preserves_used_padding_and_overlay(self):
         original = bytearray(self.common_fixture())
         original[0x400] = 1
+        original.extend(b'original overlay')
+        patched=patch_common(bytes(original));pe=Win32Image(patched)
+        self.assertEqual(len(pe.sections),2)
+        at,size,va,raw_size,raw,flags=pe.sections[-1]
+        self.assertEqual(patched[at:at+8],b'.dsport\0')
+        self.assertEqual(patched[0x400:len(original)],original[0x400:])
+        self.assertEqual(raw%512,0)
+        self.assertEqual(va%4096,0)
+        self.assertEqual(flags,0x60000020)
+        self.assertEqual(patched[raw:raw+9],bytes.fromhex('64a124000000890424'))
+        self.assertEqual(patch_common(patched),patched)
+
+    def test_common_patch_refuses_occupied_section_header(self):
+        original=bytearray(self.common_fixture());original[0x400]=1;original[0x1a0]=1
         with self.assertRaises(ValueError):
             patch_common(bytes(original))
+
+    def test_added_section_patches_all_hooks(self):
+        original=bytearray(self.common_fixture());original[0x400]=1
+        original[0x260:0x26f]=original[0x240:0x24f]
+        patched=patch_common(bytes(original));pe=Win32Image(patched)
+        for source in (0x240,0x260):
+            self.assertEqual(patched[source],0xe9)
+            self.assertEqual(patched[source+9:source+15],original[source+9:source+15])
+        self.assertEqual(patch_common(patched),patched)
+
+    def test_added_section_relocates_callback_and_keeps_jump_valid(self):
+        original=bytearray(self.common_fixture());original[0x400]=1
+        struct.pack_into('<II',original,0x98+136,0x11d0,12)
+        struct.pack_into('<IIHH',original,0x3d0,0x1000,12,0x3043,0x304b)
+        patched=patch_common(bytes(original));pe=Win32Image(patched)
+        stub=pe.sections[-1][4];stub_rva=pe.sections[-1][2]
+        reloc_rva,reloc_size=struct.unpack_from('<II',patched,pe.optional+136)
+        table=pe.offset(reloc_rva)
+        self.assertEqual(struct.unpack_from('<H',patched,table+8)[0],0)
+        rebased=bytearray(patched);pos=table
+        while pos<table+reloc_size:
+            page,size=struct.unpack_from('<II',patched,pos)
+            for at in range(pos+8,pos+size,2):
+                entry=struct.unpack_from('<H',patched,at)[0]
+                if entry>>12==3:
+                    target=pe.offset(page+(entry&4095))
+                    value=struct.unpack_from('<I',rebased,target)[0]
+                    struct.pack_into('<I',rebased,target,value+0x100000)
+            pos+=size
+        self.assertEqual(rebased[0x240:0x249],patched[0x240:0x249])
+        self.assertEqual(struct.unpack_from('<I',rebased,stub+12)[0],0x700000+0x1020)
+        self.assertEqual(struct.unpack_from('<I',rebased,0x24b)[0],0x700000+0x1160)
+        self.assertEqual(0x1040+5+struct.unpack_from('<i',patched,0x241)[0],stub_rva)
+        self.assertEqual(stub_rva+23+struct.unpack_from('<i',patched,stub+19)[0],0x1049)
+
+    @unittest.skipUnless(os.environ.get('DS2PORT_TEST_DF3'),'set DS2PORT_TEST_DF3 to an owned DF3 folder')
+    def test_owned_df3_adds_section_without_changing_original(self):
+        folder=Path(os.environ['DS2PORT_TEST_DF3']);profile=detect_game(folder)
+        path=folder/profile['executable'];original=path.read_bytes()
+        patched=patch_executable(original,profile)
+        before,after=Win32Image(original),Win32Image(patched)
+        self.assertEqual(profile['font_width_percent'],90)
+        self.assertIn('savedat1.dat',[name.lower() for name in profile['preserve']])
+        self.assertEqual(len(after.sections),len(before.sections)+1)
+        self.assertEqual(after.imports(),before.imports())
+        self.assertEqual(path.read_bytes(),original)
+        self.assertEqual(patch_common(patched),patched)
+        # Explicit CLI profiles must preserve every non-EXE file too.
+        explicit=next(item for item in profiles() if item['id']=='df3')
+        with tempfile.TemporaryDirectory() as temp:
+            payload=Path(temp)/'payload.tar.gz'
+            config=prepare_payload(folder,None,explicit,'df3-test',payload)
+            self.assertIn('savedat1.dat',[name.lower() for name in config['preserve']])
+            with tarfile.open(payload) as tf:
+                self.assertEqual(tf.extractfile('game/DF3.exe').read(),patched)
+                self.assertEqual(tf.extractfile('game/DF3.original.exe').read(),original)
+        # A same-named but different version must retain the 100% default.
+        changed=bytearray(original);changed[before.optional+64]^=1
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp)/profile['executable']).write_bytes(changed)
+            other=detect_game(temp)
+            self.assertEqual(other.get('font_width_percent',100),100)
 
     @unittest.skipUnless(os.environ.get('DS2PORT_TEST_FLOAT'), 'set DS2PORT_TEST_FLOAT to an owned FLOAT folder')
     def test_generic_float_detection_patch_and_payload(self):
@@ -194,12 +294,17 @@ class Profiles(unittest.TestCase):
         profile = detect_game(source)
         self.assertEqual(profile['id'], 'float')
         self.assertEqual(profile['patch'], 'discstation-common-v1')
+        self.assertEqual(profile.get('font_width_percent',100),100)
         original = (source / profile['executable']).read_bytes()
         patched = patch_executable(original, profile)
         self.assertNotEqual(original, patched)
-        self.assertEqual(len(original), len(patched))
+        self.assertGreater(len(patched), len(original))
         pe = Win32Image(patched)
         self.assertIn('SetWindowsHookExA', pe.imports())
+        from ds2port.profiles import _font_metric_calls
+        for call in _font_metric_calls(original,Win32Image(original),pe.imports()):
+            create_offset=call[4]
+            self.assertEqual(patched[create_offset:create_offset+6],original[create_offset:create_offset+6])
         self.assertIn(bytes.fromhex('64a124000000890424'), patched)
         self.assertIn('SAVE_D0.DAT', profile['preserve'])
         with tempfile.TemporaryDirectory() as temp:
@@ -236,7 +341,7 @@ class Profiles(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("DS2PORT_TEST_GAME"),"set DS2PORT_TEST_GAME to an owned unmodified game folder")
     def test_owned_game_end_to_end_payload(self):
         source=Path(os.environ["DS2PORT_TEST_GAME"])
-        profile=profiles()[0]
+        profile=detect_game(source)
         exe=game_executable(source,profile)
         before=digest(exe.read_bytes())
         result=patch_executable(exe.read_bytes(),profile)
@@ -257,7 +362,7 @@ class Profiles(unittest.TestCase):
     def test_runtime_bundle_contains_no_game_or_windows_font(self):
         path=root()/"bld/runtime.tar.gz"
         _,metadata=validate_bundle(path)
-        forbidden={"jump3.exe","jump3.original.exe","float.exe","float.original.exe","ac_mon.exe","ac_mon.original.exe","msgothic.ttc"}
+        forbidden={"jump3.exe","jump3.original.exe","float.exe","float.original.exe","ac_mon.exe","ac_mon.original.exe","df3.exe","df3.original.exe","msgothic.ttc"}
         self.assertFalse(any(Path(name).name.casefold() in forbidden for name in metadata["files"]))
         self.assertIn("native/bin/sb16-synth",metadata["files"])
 

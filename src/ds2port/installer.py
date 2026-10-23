@@ -102,7 +102,7 @@ def prepare_payload(source, font, profile, port_id, output, input_mode="mouse"):
         add_bytes(tf, "launcher.sh", render_template("port-launcher.sh.in", replacements), True)
     return {"port_id": port_id, "profile": profile["id"], "input_mode": input_mode, "executable": profile["executable"],
             "launcher": (profile["launcher"] if port_id == profile["id"] else profile["launcher"] + " (" + port_id + ")") + ".sh",
-            "game_sha256": digest(patched), "preserve": profile["preserve"],
+            "game_sha256": digest(patched), "preserve": profile.get("preserve", [item.name for item in source.iterdir() if item != executable]),
             "payload_sha256": file_hash(output), "game_bytes": total + len(patched) + len(original)}
 
 

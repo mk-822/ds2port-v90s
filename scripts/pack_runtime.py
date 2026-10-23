@@ -15,7 +15,7 @@ with tarfile.open(source, "r:") as original:
         if not member.isfile():
             continue
         name = PurePosixPath(member.name).as_posix()
-        if PurePosixPath(name).name.casefold() in {"msgothic.ttc", "jump3.exe", "jump3.original.exe", "float.exe", "float.original.exe", "ac_mon.exe", "ac_mon.original.exe"}:
+        if PurePosixPath(name).name.casefold() in {"msgothic.ttc", "jump3.exe", "jump3.original.exe", "float.exe", "float.original.exe", "ac_mon.exe", "ac_mon.original.exe", "df3.exe", "df3.original.exe"}:
             raise SystemExit("Private file in runtime: " + name)
         h = hashlib.sha256()
         with original.extractfile(member) as f:
