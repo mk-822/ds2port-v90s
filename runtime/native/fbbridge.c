@@ -15,6 +15,19 @@
 #include <math.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <time.h>
+#include <errno.h>
+#include "frame_capture.h"
+static int64_t clock_ns(void){
+ struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);
+ return (int64_t)t.tv_sec*1000000000+t.tv_nsec;
+}
+static double setting(const char*name,double fallback,double low,double high){
+ const char*text=getenv(name);char*end;
+ if(!text||!*text)return fallback;
+ double value=strtod(text,&end);
+ return *end||!isfinite(value)||value<low||value>high?fallback:value;
+}
 static int update_volume(int previous){
  FILE*f=fopen("/run/plumos/volume/current","r");int level;
  if(!f)return previous;int ok=fscanf(f,"%d",&level);fclose(f);if(ok!=1)return previous;
@@ -41,7 +54,20 @@ int main(int argc,char**argv){
  int(*button)(Display*,unsigned int,int,unsigned long)=xt?dlsym(xt,"XTestFakeButtonEvent"):0;
  int(*key)(Display*,unsigned int,int,unsigned long)=xt?dlsym(xt,"XTestFakeKeyEvent"):0;
  int input=open("/dev/input/event4",O_RDONLY|O_NONBLOCK),mx=320,my=240,dx=0,dy=0,start=0,select=0,fast_r2=0,fast_y=0;
- int volume=-1,ticks=0;
+ int volume=-1;
+ FrameCapture capture;
+ const char*capture_mode=getenv("DS2PORT_CAPTURE");
+ capture_open(&capture,d,!capture_mode||strcmp(capture_mode,"ximage"));
+ double fps=setting("DS2PORT_FPS",60,10,120);
+ /* The old copy+33ms loop ran at about 17Hz, moving 7 pixels per frame.
+  * Preserve its feel independently of the new display refresh rate. */
+ double cursor_speed=setting("DS2PORT_CURSOR_SPEED",120,10,2000);
+ double cursor_x=mx,cursor_y=my;
+ int64_t period=(int64_t)(1000000000/fps),deadline=clock_ns(),cursor_time=deadline;
+ int64_t volume_time=0,report_time=deadline;
+ uint64_t frames=0,changed=0,previous_hash=0;
+ double read_time=0,copy_time=0;
+ fprintf(stderr,"DISPLAY_CAPTURE=%s target_fps=%.1f cursor_px_s=%.1f\n",capture.shared?"shm":"ximage",fps,cursor_speed);
  char overlay[PATH_MAX];
  const char*runtime=getenv("PLUMOS_RUNTIME_ROOT");
  snprintf(overlay,sizeof(overlay),"%s/power-menu-overlay.lock",runtime&&*runtime?runtime:"/run/plumos");
@@ -58,6 +84,8 @@ int main(int argc,char**argv){
   struct input_event pending;
   while(input>=0&&read(input,&pending,sizeof(pending))==sizeof(pending)){}
   dx=dy=start=select=fast_r2=fast_y=0;
+  cursor_time=deadline=report_time=clock_ns();
+  frames=changed=0;read_time=copy_time=0;
   if(button){button(d,1,0,0);button(d,3,0,0);}
   if(key){key(d,XKeysymToKeycode(d,0xff0d),0,0);key(d,XKeysymToKeycode(d,0xff1b),0,0);}
   XFlush(d);
@@ -70,9 +98,11 @@ int main(int argc,char**argv){
   while(input>=0&&read(input,&pending,sizeof(pending))==sizeof(pending)){}
   usleep(33000);continue;
  }
- if(ticks++%5==0)volume=update_volume(volume);
+ int64_t frame_time=clock_ns();
+ if(frame_time-volume_time>=250000000){volume=update_volume(volume);volume_time=frame_time;}
  struct input_event ev;
  while(input>=0&&read(input,&ev,sizeof(ev))==sizeof(ev)){
+ if(resumed||access(overlay,F_OK)==0)break;
  if(ev.type==EV_ABS){if(ev.code==ABS_HAT0X)dx=ev.value;if(ev.code==ABS_HAT0Y)dy=ev.value;}
  if(ev.type==EV_KEY&&ev.value!=2){
  int down=ev.value!=0;unsigned long sym=0;
@@ -90,19 +120,52 @@ int main(int argc,char**argv){
  if(start&&select)running=0;
  }
  }
- if(dx||dy){int speed=(fast_r2||fast_y)?14:7;mx+=dx*speed;my+=dy*speed;if(mx<0)mx=0;if(mx>639)mx=639;if(my<0)my=0;if(my>479)my=479;if(motion)motion(d,-1,mx,my,0);}
+ if(resumed||access(overlay,F_OK)==0)continue;
+ double elapsed=(frame_time-cursor_time)/1e9;cursor_time=frame_time;
+ if(elapsed>.1)elapsed=.1;
+ if(dx||dy){
+  double speed=cursor_speed*((fast_r2||fast_y)?2:1);
+  cursor_x+=dx*speed*elapsed;cursor_y+=dy*speed*elapsed;
+  if(cursor_x<0)cursor_x=0;if(cursor_x>639)cursor_x=639;
+  if(cursor_y<0)cursor_y=0;if(cursor_y>479)cursor_y=479;
+  mx=(int)cursor_x;my=(int)cursor_y;if(motion)motion(d,-1,mx,my,0);
+ }
  XFlush(d);
- XImage*i=XGetImage(d,root,0,0,640,480,AllPlanes,ZPixmap);
+ int64_t read_start=clock_ns();
+ XImage*i=capture_read(&capture);
+ int64_t copy_start=clock_ns();
  if(i){
  if(i->bits_per_pixel==32&&v.red.offset==16&&v.green.offset==8&&v.blue.offset==0){
- for(unsigned y=0;y<v.yres&&y<480;y++){uint32_t*out=(uint32_t*)(fb+(y+v.yoffset)*fi.line_length+v.xoffset*4);memcpy(out,i->data+y*i->bytes_per_line,640*4);if(alpha)for(int x=0;x<640;x++)out[x]|=alpha;}
+ for(unsigned y=0;y<v.yres&&y<480;y++){
+  uint32_t*out=(uint32_t*)(fb+(y+v.yoffset)*fi.line_length+v.xoffset*4);
+  const uint32_t*in=(const uint32_t*)(i->data+y*i->bytes_per_line);
+  /* Do not read framebuffer memory: uncached read/modify/write costs far
+   * more than ORing alpha into the cached source before each store. */
+  if(alpha)for(int x=0;x<640;x++)out[x]=in[x]|alpha;
+  else memcpy(out,in,640*4);
+ }
  }else for(unsigned y=0;y<v.yres&&y<480;y++)for(unsigned x=0;x<v.xres&&x<640;x++){
  unsigned long p=XGetPixel(i,x,y);uint32_t q=alpha|((p>>16)&255)<<v.red.offset|((p>>8)&255)<<v.green.offset|(p&255)<<v.blue.offset;
  *((uint32_t*)(fb+(y+v.yoffset)*fi.line_length+(x+v.xoffset)*4))=q;
  }
- XDestroyImage(i);
+ int64_t copy_end=clock_ns();
+ uint64_t hash=1469598103934665603ULL;
+ for(int y=0;y<480;y+=8)for(int x=0;x<640;x+=8){hash^=XGetPixel(i,x,y);hash*=1099511628211ULL;}
+ if(hash!=previous_hash)changed++;previous_hash=hash;
+ read_time+=(copy_start-read_start)/1e6;copy_time+=(copy_end-copy_start)/1e6;frames++;
+ capture_release(&capture);
  }
- usleep(33000);
+ int64_t current=clock_ns();
+ if(current-report_time>=10000000000LL&&frames){
+  double seconds=(current-report_time)/1e9;
+  fprintf(stderr,"DISPLAY_STATS capture=%s fps=%.2f sampled_changes_s=%.2f read_ms=%.3f copy_ms=%.3f\n",capture.shared?"shm":"ximage",frames/seconds,changed/seconds,read_time/frames,copy_time/frames);
+  report_time=current;frames=changed=0;read_time=copy_time=0;
  }
+ deadline+=period;
+ if(deadline<current)deadline=current;
+ struct timespec target={deadline/1000000000,deadline%1000000000};
+ while(running&&clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&target,NULL)==EINTR&&!resumed){}
+ }
+ capture_close(&capture);
  if(input>=0)close(input);munmap(fb,fi.smem_len);close(f);XCloseDisplay(d);return 0;
 }
