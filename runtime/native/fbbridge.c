@@ -48,6 +48,11 @@ int main(int argc,char**argv){
  unsigned char*fb=mmap(0,fi.smem_len,PROT_READ|PROT_WRITE,MAP_SHARED,f,0);if(fb==MAP_FAILED)return 3;
  fprintf(stderr,"FB %ux%u bpp=%u stride=%u offset=%u,%u RGB=%u,%u,%u\n",v.xres,v.yres,v.bits_per_pixel,fi.line_length,v.xoffset,v.yoffset,v.red.offset,v.green.offset,v.blue.offset);
  uint32_t alpha=v.transp.length?((1u<<v.transp.length)-1)<<v.transp.offset:0;
+ const char*present_mode=getenv("DS2PORT_PRESENT");
+ int double_buffer=(!present_mode||strcmp(present_mode,"single"))&&v.yres==480&&
+  v.yres_virtual>=v.yres*2&&fi.ypanstep&&v.yoffset%v.yres==0&&v.yoffset<v.yres*2&&
+  (uint64_t)fi.line_length*v.yres*2<=fi.smem_len;
+ fprintf(stderr,"DISPLAY_PRESENT=%s\n",double_buffer?"pageflip-vblank":"single");
  Window root=DefaultRootWindow(d);
  void*xt=dlopen("libXtst.so.6",RTLD_NOW);
  int(*motion)(Display*,int,int,int,unsigned long)=xt?dlsym(xt,"XTestFakeMotionEvent"):0;
@@ -66,7 +71,7 @@ int main(int argc,char**argv){
  int64_t period=(int64_t)(1000000000/fps),deadline=clock_ns(),cursor_time=deadline;
  int64_t volume_time=0,report_time=deadline;
  uint64_t frames=0,changed=0,previous_hash=0;
- double read_time=0,copy_time=0;
+ double read_time=0,copy_time=0,present_time=0;
  fprintf(stderr,"DISPLAY_CAPTURE=%s target_fps=%.1f cursor_px_s=%.1f\n",capture.shared?"shm":"ximage",fps,cursor_speed);
  char overlay[PATH_MAX];
  const char*runtime=getenv("PLUMOS_RUNTIME_ROOT");
@@ -85,7 +90,7 @@ int main(int argc,char**argv){
   while(input>=0&&read(input,&pending,sizeof(pending))==sizeof(pending)){}
   dx=dy=start=select=fast_r2=fast_y=0;
   cursor_time=deadline=report_time=clock_ns();
-  frames=changed=0;read_time=copy_time=0;
+  frames=changed=0;read_time=copy_time=present_time=0;
   if(button){button(d,1,0,0);button(d,3,0,0);}
   if(key){key(d,XKeysymToKeycode(d,0xff0d),0,0);key(d,XKeysymToKeycode(d,0xff1b),0,0);}
   XFlush(d);
@@ -135,9 +140,10 @@ int main(int argc,char**argv){
  XImage*i=capture_read(&capture);
  int64_t copy_start=clock_ns();
  if(i){
+ unsigned render_y=double_buffer?(v.yoffset==0?v.yres:0):v.yoffset;
  if(i->bits_per_pixel==32&&v.red.offset==16&&v.green.offset==8&&v.blue.offset==0){
  for(unsigned y=0;y<v.yres&&y<480;y++){
-  uint32_t*out=(uint32_t*)(fb+(y+v.yoffset)*fi.line_length+v.xoffset*4);
+  uint32_t*out=(uint32_t*)(fb+(y+render_y)*fi.line_length+v.xoffset*4);
   const uint32_t*in=(const uint32_t*)(i->data+y*i->bytes_per_line);
   /* Do not read framebuffer memory: uncached read/modify/write costs far
    * more than ORing alpha into the cached source before each store. */
@@ -146,9 +152,18 @@ int main(int argc,char**argv){
  }
  }else for(unsigned y=0;y<v.yres&&y<480;y++)for(unsigned x=0;x<v.xres&&x<640;x++){
  unsigned long p=XGetPixel(i,x,y);uint32_t q=alpha|((p>>16)&255)<<v.red.offset|((p>>8)&255)<<v.green.offset|(p&255)<<v.blue.offset;
- *((uint32_t*)(fb+(y+v.yoffset)*fi.line_length+(x+v.xoffset)*4))=q;
+ *((uint32_t*)(fb+(y+render_y)*fi.line_length+(x+v.xoffset)*4))=q;
  }
  int64_t copy_end=clock_ns();
+ if(double_buffer){
+  struct fb_var_screeninfo pan=v;pan.yoffset=render_y;pan.activate=FB_ACTIVATE_VBL;
+  if(ioctl(f,FBIOPAN_DISPLAY,&pan)==0)v.yoffset=render_y;
+  else{
+   fprintf(stderr,"DISPLAY_PAGEFLIP_FAILED errno=%d; switching to single buffer\n",errno);
+   double_buffer=0;ioctl(f,FBIOGET_VSCREENINFO,&v);
+  }
+ }
+ present_time+=(clock_ns()-copy_end)/1e6;
  uint64_t hash=1469598103934665603ULL;
  for(int y=0;y<480;y+=8)for(int x=0;x<640;x+=8){hash^=XGetPixel(i,x,y);hash*=1099511628211ULL;}
  if(hash!=previous_hash)changed++;previous_hash=hash;
@@ -158,8 +173,8 @@ int main(int argc,char**argv){
  int64_t current=clock_ns();
  if(current-report_time>=10000000000LL&&frames){
   double seconds=(current-report_time)/1e9;
-  fprintf(stderr,"DISPLAY_STATS capture=%s fps=%.2f sampled_changes_s=%.2f read_ms=%.3f copy_ms=%.3f\n",capture.shared?"shm":"ximage",frames/seconds,changed/seconds,read_time/frames,copy_time/frames);
-  report_time=current;frames=changed=0;read_time=copy_time=0;
+  fprintf(stderr,"DISPLAY_STATS capture=%s present=%s fps=%.2f sampled_changes_s=%.2f read_ms=%.3f copy_ms=%.3f present_ms=%.3f\n",capture.shared?"shm":"ximage",double_buffer?"pageflip-vblank":"single",frames/seconds,changed/seconds,read_time/frames,copy_time/frames,present_time/frames);
+  report_time=current;frames=changed=0;read_time=copy_time=present_time=0;
  }
  deadline+=period;
  if(deadline<current)deadline=current;
