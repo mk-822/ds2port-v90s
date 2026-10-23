@@ -3,7 +3,9 @@ pcm.jump3_dmix {
  type dmix
  ipc_key 486931
  ipc_perm 0600
- slave { pcm "hw:0,0" rate 44100 format S16_LE channels 2 period_size 1024 buffer_size 4096 }
+ # The codec/DMA runs near 48k even when the kernel reports 44.1k. Use its
+ # 48k domain and let the outer plug resample sources instead of raising pitch.
+ slave { pcm "hw:0,0" rate 48000 format S16_LE channels 2 period_size 1024 buffer_size 4096 }
 }
 pcm_type.jump3_volume { lib "@@RUNTIME@@/native/lib/libasound_module_pcm_jump3_volume.so" }
 pcm.jump3_volume { type jump3_volume slave.pcm "jump3_dmix" }
