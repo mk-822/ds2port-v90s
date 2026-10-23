@@ -3,7 +3,7 @@ set -u
 P=@@PORT@@
 . "$P/env.sh"
 if [ "${1:-}" = --check ]; then
- for f in "$P/game/@@EXE@@" "$W/bin/wine" "$P/runtime/box64" "$R/native/bin/Xvfb" "$R/native/bin/fbbridge" "$R/native/bin/sb16-synth" "$P/assets/fonts/msgothic.ttc"; do
+ for f in "$P/game/"@@EXE@@ "$W/bin/wine" "$P/runtime/box64" "$R/native/bin/Xvfb" "$R/native/bin/fbbridge" "$R/native/bin/sb16-synth" "$P/assets/fonts/msgothic.ttc"; do
   [ -f "$f" ] || { echo "Missing: $f"; exit 1; }
  done
  echo 'DS2PORT_RUNTIME_OK'

@@ -20,6 +20,27 @@ def sha(path):
     return h.hexdigest()
 
 
+def same_tree(source, destination):
+    """Reuse identical runtime trees so an update need not keep a second Wine."""
+    if not destination.is_dir() or destination.is_symlink():
+        return False
+    def entries(root):
+        result = {}
+        for item in root.rglob('*'):
+            relative = item.relative_to(root).as_posix()
+            if item.is_symlink():
+                result[relative] = ('link', os.readlink(item))
+            elif item.is_file():
+                result[relative] = ('file', sha(item), item.stat().st_mode & 0o777)
+            elif item.is_dir():
+                result[relative] = ('directory',)
+            else:
+                return None
+        return result
+    expected = entries(source)
+    return expected is not None and expected == entries(destination)
+
+
 def safe_extract(archive, destination):
     """Validate paths and link targets before creating any archive member."""
     with tarfile.open(archive) as tf:
@@ -119,6 +140,10 @@ def main(config_path):
         existing_roots = {child.name.casefold() for child in (p / "game").iterdir()} if existing_game else set()
         for name in ("native", "wine-10.0-amd64-wow64", "licenses"):
             dest = r / name
+            if same_tree(runtime / name, dest):
+                print('既存ランタイムを再利用: ' + name, flush=True)
+                shutil.rmtree(runtime / name)
+                continue
             old = backup / name if dest.exists() else None
             if old:
                 os.replace(dest, old)

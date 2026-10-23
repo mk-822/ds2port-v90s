@@ -23,7 +23,7 @@ for source in (Path(sys.base_prefix)/'tcl').rglob('license.terms'):
     target=folder/'licenses/tcl-tk'/(source.parent.name+'-license.txt')
     target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,target)
 (folder/'python-packages.json').write_text(json.dumps(versions,indent=2))
-for forbidden in ('msgothic.ttc','JUMP3.EXE','JUMP3.original.exe','known_hosts','.env'):
+for forbidden in ('msgothic.ttc','JUMP3.EXE','JUMP3.original.exe','FLOAT.EXE','FLOAT.original.exe','known_hosts','.env'):
     if any(p.name.casefold()==forbidden.casefold() for p in folder.rglob('*')):raise SystemExit('Private file in release')
 items={p.relative_to(folder).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in folder.rglob('*') if p.is_file() and p.name!='checksums.json'}
 (folder/'checksums.json').write_text(json.dumps(items,indent=2))

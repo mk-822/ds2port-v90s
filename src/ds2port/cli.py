@@ -3,7 +3,7 @@ import json
 import os
 from pathlib import Path
 from .installer import install, inspect_device, launch
-from .profiles import profiles
+from .profiles import profiles, detect_game
 from .resources import application_dir
 from .ssh import Connection, UnknownHostKey, trust_host
 
@@ -20,7 +20,8 @@ def main(argv=None):
     parser.add_argument("--source", type=Path)
     parser.add_argument("--runtime", type=Path, default=application_dir() / "runtime.tar.gz")
     parser.add_argument("--font", type=Path)
-    parser.add_argument("--profile", default="jump3")
+    parser.add_argument("--profile", default="auto", help="通常はauto（既知の互換設定を自動認識）")
+    parser.add_argument("--executable", help="ゲームフォルダー内の起動EXE名。複数ある場合に指定")
     parser.add_argument("--port-id", help="検証用の別配置ID。通常は省略")
     parser.add_argument("--launch", action="store_true")
     args = parser.parse_args(argv)
@@ -40,7 +41,7 @@ def main(argv=None):
         else:
             if args.source is None:
                 parser.error("installには --source が必要です。")
-            profile = next((p for p in profiles() if p["id"] == args.profile), None)
+            profile = detect_game(args.source, args.executable) if args.profile == 'auto' else next((p for p in profiles() if p["id"] == args.profile), None)
             if profile is None:
                 parser.error("未対応のゲームです。")
             config = install(connection, args.source, args.runtime, profile, args.font, args.port_id)

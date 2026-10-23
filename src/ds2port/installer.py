@@ -64,7 +64,8 @@ def prepare_payload(source, font, profile, port_id, output):
     patched = patch_executable(original, profile)
     font = windows_font(font)
     p, r = "/mnt/plumos/roms/ports/" + port_id, "/mnt/plumos/ports-runtime/" + port_id
-    replacements = {"PORT": p, "RUNTIME": r, "EXE": profile["executable"]}
+    replacements = {"PORT": p, "RUNTIME": r, "EXE": shlex.quote(profile["executable"])}
+    backup_name = executable.stem + '.original.exe'
 
     def add_bytes(tf, name, content, executable=False):
         item = tarfile.TarInfo(name)
@@ -78,7 +79,7 @@ def prepare_payload(source, font, profile, port_id, output):
                 raise ValueError("ゲームフォルダー内のシンボリックリンクは転送できません。")
             if path.is_file() and path != executable:
                 name = "game/" + path.relative_to(source).as_posix()
-                if name.casefold() == "game/jump3.original.exe":
+                if name.casefold() == ('game/' + backup_name).casefold():
                     continue
                 # Normalize modes; an NTFS readonly source must remain writable on SD.
                 def mode(item):
@@ -87,7 +88,7 @@ def prepare_payload(source, font, profile, port_id, output):
                 tf.add(path, arcname=name, recursive=False, filter=mode)
                 total += path.stat().st_size
         add_bytes(tf, "game/" + profile["executable"], patched)
-        add_bytes(tf, "game/JUMP3.original.exe", original)
+        add_bytes(tf, "game/" + backup_name, original)
         add_bytes(tf, "port/assets/fonts/msgothic.ttc", font.read_bytes())
         for name in ("env.sh", "launch.sh", "fonts.conf", "asound.conf"):
             add_bytes(tf, "port/" + name, render_template(name + ".in", replacements), name.endswith(".sh"))

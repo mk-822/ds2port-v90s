@@ -5,9 +5,8 @@ import queue
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from . import __version__
 from .installer import install, inspect_device, launch, windows_font
-from .profiles import profiles
+from .profiles import detect_game, executables
 from .resources import application_dir
 from .ssh import Connection, UnknownHostKey, trust_host
 
@@ -18,27 +17,26 @@ class App(ttk.Frame):
         self.pack(fill="both", expand=True)
         master.title("DS2Port V90S — DiscStation 転送ツール")
         master.minsize(780, 760)
-        self.profiles = profiles()
         self.events, self.busy = queue.Queue(), False
         self.values = {name: tk.StringVar(value=value) for name, value in {
-            "profile": self.profiles[0]["title"], "source": "", "host": "", "username": "root",
+            "executable": "", "source": "", "host": "", "username": "root",
             "password": "", "key": "", "runtime": str(application_dir() / "runtime.tar.gz"),
             "font": str(Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts/msgothic.ttc"),
         }.items()}
         self.start_after = tk.BooleanVar(value=False)
         self._build()
+        self.values['source'].trace_add('write', self._source_changed)
         self.after(80, self._poll)
         master.protocol("WM_DELETE_WINDOW", self._close)
 
     def _build(self):
-        ttk.Label(self, text="DiscStationのゲームを、本体へ。", font=("Yu Gothic UI", 18, "bold")).pack(anchor="w")
-        ttk.Label(self, text=f"PlumOS V90S V2 対応 · v{__version__}  |  所有するゲームのフォルダーを指定してください。", foreground="#555555").pack(anchor="w", pady=(4, 14))
         game = ttk.LabelFrame(self, text="転送するゲーム", padding=12)
         game.pack(fill="x")
         game.columnconfigure(1, weight=1)
-        ttk.Label(game, text="ゲーム").grid(row=0, column=0, sticky="w", padx=(0, 12), pady=5)
-        ttk.Combobox(game, textvariable=self.values["profile"], values=[p["title"] for p in self.profiles], state="readonly").grid(row=0, column=1, columnspan=2, sticky="ew")
-        self._path_row(game, 1, "ゲームフォルダー", "source", True)
+        self._path_row(game, 0, "ゲームフォルダー", "source", True)
+        ttk.Label(game, text="起動EXE").grid(row=1, column=0, sticky="w", padx=(0, 12), pady=5)
+        self.exe_picker = ttk.Combobox(game, textvariable=self.values["executable"], state="readonly")
+        self.exe_picker.grid(row=1, column=1, columnspan=2, sticky="ew")
         self._path_row(game, 2, "ランタイム", "runtime", False)
         self._path_row(game, 3, "MSゴシック（このPC）", "font", False)
         try:
@@ -72,6 +70,15 @@ class App(ttk.Frame):
         scrollbar = ttk.Scrollbar(log_frame, command=self.log.yview)
         scrollbar.pack(side="right", fill="y")
         self.log.configure(yscrollcommand=scrollbar.set)
+
+    def _source_changed(self, *_):
+        try:
+            names = [p.name for p in executables(Path(self.values['source'].get()))] if self.values['source'].get() else []
+        except (OSError, ValueError):
+            names = []
+        self.exe_picker.configure(values=names)
+        if self.values['executable'].get() not in names:
+            self.values['executable'].set(names[0] if len(names) == 1 else '')
 
     def _path_row(self, parent, row, label, name, folder):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=5)
@@ -114,7 +121,8 @@ class App(ttk.Frame):
                 trust_host(error)
                 connection = Connection(**options)
             if transfer:
-                profile = next(p for p in self.profiles if p["title"] == values["profile"])
+                profile = detect_game(Path(values['source']), values['executable'] or None)
+                log('起動EXE: ' + profile['executable'] + ' / ' + profile['status'])
                 result = install(connection, Path(values["source"]), Path(values["runtime"]), profile, font=values["font"] or None,
                                  log=log, progress=lambda value: self.events.put(("progress", value)))
                 if start_after:
