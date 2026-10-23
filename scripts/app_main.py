@@ -32,6 +32,7 @@ def main():
         window.geometry("800x760")
         window.update()
         result = {"gui": True, "profiles": len(profiles()), "windows_font": windows_font().name,
+                  "input_mode": app.values['input_mode'].get(),
                   "requested_width": app.winfo_reqwidth(), "requested_height": app.winfo_reqheight()}
         window.destroy()
         if len(sys.argv) > 2:

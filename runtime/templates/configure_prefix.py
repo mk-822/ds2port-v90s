@@ -28,7 +28,7 @@ def merge_section(text, section, values, remove=()):
         match=re.match(r'^"((?:[^"\\]|\\.)*)"=',line)
         if not match or match.group(1) not in encoded_names:body.append(line)
     while body and not body[-1].strip():body.pop()
-    body += [json.dumps(name)+'='+json.dumps(value)+'\n' for name,value in values.items()]
+    body += [json.dumps(name)+'='+('dword:%08x'%value if isinstance(value,int) else json.dumps(value))+'\n' for name,value in values.items()]
     lines[start+1:end]=body+['\n']
     return ''.join(lines)
 
@@ -37,7 +37,8 @@ def configure(prefix):
     prefix=Path(prefix)
     system,user=prefix/'system.reg',prefix/'user.reg'
     if not system.is_file() or not user.is_file():raise RuntimeError('Wine初期化が完了していません。')
-    changes={system:[(r'System\\CurrentControlSet\\Control\\Nls\\CodePage',{'ACP':'932','OEMCP':'932','MACCP':'10001'},())],
+    changes={system:[(r'System\\CurrentControlSet\\Control\\Nls\\CodePage',{'ACP':'932','OEMCP':'932','MACCP':'10001'},()),
+                     (r'System\\CurrentControlSet\\Services\\winebus',{'Enable SDL':0,'DisableInput':0,'DisableUdevd':1},())],
              user:[(r'Control Panel\\International',{'Locale':'00000411','LocaleName':'ja-JP'},()),
                    (r'Software\\Wine\\Direct3D',{'renderer':'gdi'},()),
                    (r'Software\\Wine\\X11 Driver',{'Managed':'N','Decorated':'N'},()),

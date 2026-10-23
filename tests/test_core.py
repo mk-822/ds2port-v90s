@@ -20,6 +20,16 @@ spec2.loader.exec_module(prefix_config)
 
 
 class PrefixConfiguration(unittest.TestCase):
+    def test_winebus_dword_values_are_idempotent(self):
+        section=r'System\\CurrentControlSet\\Services\\winebus'
+        values={'Enable SDL':0,'DisableInput':0,'DisableUdevd':1}
+        text='WINE REGISTRY Version 2\n\n['+section+'] 1\n"Enable SDL"=dword:00000001\n"Other"="keep"\n'
+        result=prefix_config.merge_section(text,section,values)
+        self.assertIn('"Enable SDL"=dword:00000000',result)
+        self.assertIn('"DisableUdevd"=dword:00000001',result)
+        self.assertIn('"Other"="keep"',result)
+        self.assertEqual(result,prefix_config.merge_section(result,section,values))
+
     def test_preserves_unrelated_registry_values(self):
         text='WINE REGISTRY Version 2\n\n[System\\\\CurrentControlSet\\\\Control\\\\Nls\\\\CodePage] 1\n"ACP"="1252"\n"Other"="keep"\n\n[Unrelated] 2\n"X"="Y"\n'
         result=prefix_config.merge_section(text,r'System\\CurrentControlSet\\Control\\Nls\\CodePage',{'ACP':'932'})
@@ -82,6 +92,13 @@ class ArchiveSafety(unittest.TestCase):
 
 
 class Profiles(unittest.TestCase):
+    def test_invalid_input_mode_does_not_create_payload(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output=Path(temp)/'payload.tar.gz'
+            with self.assertRaises(ValueError):
+                prepare_payload(temp,None,profiles()[0],'test',output,input_mode='invalid')
+            self.assertFalse(output.exists())
+
     def common_fixture(self, base=0x600000, callback=0x1020):
         # Synthetic PE with a mouse-hook call, an import table and section padding.
         image = bytearray(0x600)
@@ -140,11 +157,13 @@ class Profiles(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             payload = Path(temp) / 'payload.tar.gz'
             config = prepare_payload(source, None, profile, 'float-test', payload)
+            self.assertEqual(config['input_mode'],'mouse')
             self.assertEqual(config['launcher'], 'FLOAT (float-test).sh')
             with tarfile.open(payload) as tf:
                 self.assertEqual(tf.extractfile('game/FLOAT.original.exe').read(), original)
                 self.assertEqual(tf.extractfile('game/FLOAT.EXE').read(), patched)
                 self.assertNotIn('game/JUMP3.original.exe', tf.getnames())
+                self.assertEqual(tf.extractfile('port/input-mode').read(),b'mouse\n')
         self.assertEqual((source / profile['executable']).read_bytes(), original)
 
     @unittest.skipUnless(os.environ.get('DS2PORT_TEST_FLOAT'), 'set DS2PORT_TEST_FLOAT to an owned FLOAT folder')
@@ -176,12 +195,14 @@ class Profiles(unittest.TestCase):
         self.assertEqual(digest(result),profile["patched_sha256"])
         with tempfile.TemporaryDirectory() as temp:
             payload=Path(temp)/"payload.tar.gz"
-            config=prepare_payload(source,None,profile,"jump3-test",payload)
+            config=prepare_payload(source,None,profile,"jump3-test",payload,input_mode='joypad')
+            self.assertEqual(config['input_mode'],'joypad')
             self.assertEqual(config["preserve"],["SaveData"])
             with tarfile.open(payload) as tf:
                 self.assertEqual(digest(tf.extractfile("game/JUMP3.EXE").read()),profile["patched_sha256"])
                 self.assertEqual(digest(tf.extractfile("game/JUMP3.original.exe").read()),before)
                 self.assertEqual(tf.extractfile("port/assets/fonts/msgothic.ttc").read(4),b"ttcf")
+                self.assertEqual(tf.extractfile('port/input-mode').read(),b'joypad\n')
             self.assertEqual(digest(exe.read_bytes()),before)
 
     @unittest.skipUnless((root()/"bld/runtime.tar.gz").exists(),"build the runtime first")

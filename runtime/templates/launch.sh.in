@@ -19,6 +19,7 @@ cleanup(){
   [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
  done
  rm -f "$R/game.pid" "$R/bridge.pid" "$R/synth.pid" "$R/xvfb.pid"
+ rm -f "$R/bridge.ready"
  rmdir "$lock" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -40,16 +41,25 @@ for i in $(seq 1 10); do
  sleep 1
 done
 [ "$ready" = 1 ] || { echo 'Xvfb failed'; exit 1; }
+rm -f "$R/bridge.ready"
+DS2PORT_BRIDGE_READY="$R/bridge.ready" fbbridge >> "$P/logs/framebuffer.log" 2>&1 &
+bpid=$!; echo "$bpid" > "$R/bridge.pid"
+for i in $(seq 1 30); do
+ [ -f "$R/bridge.ready" ] && break
+ kill -0 "$bpid" 2>/dev/null || { echo 'Input bridge failed'; exit 1; }
+ sleep .1
+done
+[ -f "$R/bridge.ready" ] || { echo 'Input bridge did not become ready'; exit 1; }
 mkdir -p "$WINEPREFIX/drive_c/windows/Fonts"
 cp "$P/assets/fonts/msgothic.ttc" "$WINEPREFIX/drive_c/windows/Fonts/msgothic.ttc"
-if [ ! -f "$R/prefix-configured-v1" ]; then
+if [ ! -f "$R/prefix-configured-v2" ]; then
  if [ ! -f "$WINEPREFIX/system.reg" ]; then
   wine_run wineboot.exe --init >> "$P/logs/prefix.log" 2>&1 || true
  fi
  timeout 10 "$R/wineserver-wrapper" -k >/dev/null 2>&1 || true
  timeout 10 "$R/wineserver-wrapper" -w >/dev/null 2>&1 || { echo 'Wine initialization did not stop'; exit 1; }
  python3 "$P/configure_prefix.py" "$WINEPREFIX" >> "$P/logs/prefix.log" 2>&1 || { echo 'Japanese prefix setup failed'; exit 1; }
- touch "$R/prefix-configured-v1"
+ touch "$R/prefix-configured-v2"
 fi
 backend=$(cat "$P/midi-backend" 2>/dev/null || echo opl3)
 if [ "$backend" = soundfont ]; then
@@ -63,7 +73,5 @@ kill -0 "$spid" 2>/dev/null || { echo 'MIDI synth failed'; exit 1; }
 cd "$P/game"
 wine_run @@EXE@@ >> "$P/logs/game.log" 2>&1 &
 gpid=$!; echo "$gpid" > "$R/game.pid"
-fbbridge >> "$P/logs/framebuffer.log" 2>&1 &
-bpid=$!; echo "$bpid" > "$R/bridge.pid"
 while kill -0 "$gpid" 2>/dev/null && kill -0 "$bpid" 2>/dev/null; do sleep 1; done
 echo "DS2Port stopped $(date -u)"

@@ -48,3 +48,13 @@ DS2PortCLI.exe install --host 192.0.2.10 --source D:\FLOAT --executable FLOAT.EX
 - fbbridgeはevdevを排他取得しません。PlumOSの電源メニューはfb0を開くプロセスをSIGSTOPするため、排他取得すると停止中もコントローラーを保持し、メニュー操作を妨げます。power-menu-overlay.lockとSIGCONTを監視し、メニュー中の入力・描画を抑止し、復帰時に溜まったイベントとマウス・キー・移動状態をリセットします。
 - 初回はwinebootでprefixを作成した後、wineserverを停止してから専用prefixの日本語設定を更新します。Box64上のregeditの終了コードやレジストリ保存時刻へ依存しません。無関係な設定を保持し、変更前のレジストリもprefix内へ保存します。PCのWindowsレジストリは変更しません。
 - `LC_ALL=ja_JP.UTF-8` を本ゲームの起動環境へ設定します。Wine 10の[ロケール初期化](https://github.com/wine-mirror/wine/blob/wine-10.0/dlls/ntdll/unix/env.c)はCロケール時にLC_ALLを参照します。本体に日本語glibcロケールがない構成でも、Win32検査でGetACP=932、システム・ユーザーLCID=1041を確認しています。
+
+## 入力モードの実装
+
+fbbridgeがLinux uinputに4ボタン・2軸の仮想Joypadを作成し、L2で物理ボタンの送信先を切り替えます。Joypadはマウスモードでも起動前から存在し、起動時だけ列挙するゲームにも対応します。マウスモードではJoypadを中立に保ちます。
+
+PlumOSにはudevデーモンがないため、作成した仮想デバイスだけに `/run/udev/data` の分類情報を作り、終了時に削除します。WinebusはSDL経路を無効化し、udevの直接列挙を使用します。これにより物理10ボタンのパッドと仮想4ボタンの二重入力を避けます。物理デバイスの分類情報は変更しません。ゲーム開始前にfbbridgeの準備完了を待ちます。
+
+`port/input-mode` の `mouse` / `joypad` が起動時設定です。転送GUI・CLIから指定します。切替時と電源メニュー復帰時にマウス・キー・Joypadの状態を解放します。evdevの排他取得は行いません。
+
+`tests/joy32.c` はWinMMでのデバイス列挙と押下・解放・軸値を確認する所有ゲーム非依存の診断です。`i686-w64-mingw32-gcc -O2 tests/joy32.c -o bld/joy32.exe -lwinmm` で作成できます。`tests/virtual-joypad-probe.c` はLinux側のデバイス作成検査です。通常のfbbridgeと同時に仮想デバイスを作らず、診断後は必ず終了してください。

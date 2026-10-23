@@ -95,3 +95,18 @@ libADLMIDIはOPL3用MIDIシンセサイザーで、Nukedはその内部で選べ
 `tests/audio-rate-probe.c` は現在のdefault PCMへ無音を加え、ウォームアップ後の書込フレーム数・開始終了時の遅延・単調増加時計から消費速度を計算します。`gcc -O2 tests/audio-rate-probe.c -o bld/audio-rate-probe -lasound` でビルドできます。本体で対象ゲームと同じ環境変数の下で実行してください。PCM設定のダンプも出力するため、リサンプリング段の有無を確認できます。
 
 `tests/opl-pitch-probe.cpp` は現在の音源コア・バンク・Win9x周波数モデルでMIDIノート69を生成し、出力段を通さないデータを作ります。今回の解析では複数の音色で約437.1Hzを検出し、合成段階に約1半音の上ずりがないことも切り分けました。生成データはGitに含めません。
+
+## Box64 Dynarecの確認
+
+本体はARM64版Box64 v0.4.5（fbba162d7）＋Wine 10 WoW64で動作し、Box86は使用していません。実機ログでARM64 DynarecとCortex-A53の認識を確認しました。起動設定にも `BOX64_DYNAREC=1` を明記しています。
+
+[Box64公式設定](https://github.com/ptitSeb/box64/blob/main/docs/USAGE.md)ではDynarec搭載ビルドの既定は有効です。さらに `BIGBLOCK=2 / FORWARD=128`（既定）と `BIGBLOCK=3 / FORWARD=512` を比較しました。両条件ともDynarec有効・CALLRET=2で、同一Win32整数演算・メモリー参照を3,000万回行い、チェックサム137d4c82の一致を確認しています。
+
+| 条件 | 1回目 | 2回目 |
+| --- | ---: | ---: |
+| BIGBLOCK=2 / FORWARD=128 | 2224.499ms | 1869.061ms |
+| BIGBLOCK=3 / FORWARD=512 | 2270.044ms | 1997.982ms |
+
+候補設定は約2～7%遅く、この測定では改善しませんでした。ゲーム全体の速度を代表する測定ではありませんが、根拠のある改善がなかったため追加設定は採用していません。互換性に影響するメモリー順序や浮動小数点の精度緩和も追加していません。既存の共有メモリー取得・ダブルバッファ・垂直帰線時切替を維持しています。
+
+測定ソースは `tests/probes/dynarec32.c` です。SDK内で `i686-w64-mingw32-gcc -O2 tests/probes/dynarec32.c -o bld/dynarec32.exe` としてビルドし、本体でゲームを終了した状態で実行します。本体のRAMは1GBのため、Wineの診断プロセスをゲームと並行起動しないでください。

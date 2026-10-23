@@ -54,10 +54,12 @@ def render_template(name, replacements):
     return text.encode("utf-8")
 
 
-def prepare_payload(source, font, profile, port_id, output):
+def prepare_payload(source, font, profile, port_id, output, input_mode="mouse"):
     """Read user files without changing the source, including the original EXE."""
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", port_id):
         raise ValueError("Invalid port ID")
+    if input_mode not in ('mouse','joypad'):
+        raise ValueError('起動時モードはmouseまたはjoypadを指定してください。')
     source = Path(source).resolve()
     executable = game_executable(source, profile)
     original = executable.read_bytes()
@@ -95,9 +97,10 @@ def prepare_payload(source, font, profile, port_id, output):
         add_bytes(tf, "port/japanese.reg", (root() / "runtime/templates/japanese.reg").read_bytes())
         add_bytes(tf, "port/configure_prefix.py", (root() / "runtime/templates/configure_prefix.py").read_bytes())
         add_bytes(tf, "port/midi-backend", b"opl3\n")
+        add_bytes(tf, "port/input-mode", (input_mode+'\n').encode('ascii'))
         add_bytes(tf, "wineserver-wrapper", render_template("wineserver-wrapper.in", replacements), True)
         add_bytes(tf, "launcher.sh", render_template("port-launcher.sh.in", replacements), True)
-    return {"port_id": port_id, "profile": profile["id"], "executable": profile["executable"],
+    return {"port_id": port_id, "profile": profile["id"], "input_mode": input_mode, "executable": profile["executable"],
             "launcher": (profile["launcher"] if port_id == profile["id"] else profile["launcher"] + " (" + port_id + ")") + ".sh",
             "game_sha256": digest(patched), "preserve": profile["preserve"],
             "payload_sha256": file_hash(output), "game_bytes": total + len(patched) + len(original)}
@@ -111,7 +114,7 @@ print(json.dumps({'arch':platform.machine(),'uid':os.geteuid(),'plumos':os.path.
     return json.loads(connection.run("python3 -c " + shlex.quote(script)))
 
 
-def install(connection, source, runtime, profile, font=None, port_id=None, log=print, progress=lambda value: None):
+def install(connection, source, runtime, profile, font=None, port_id=None, log=print, progress=lambda value: None, input_mode="mouse"):
     port_id = port_id or profile["id"]
     runtime_hash, metadata = validate_bundle(runtime)
     # Reject unsupported games before making any changes on the device.
@@ -131,7 +134,7 @@ def install(connection, source, runtime, profile, font=None, port_id=None, log=p
     with tempfile.TemporaryDirectory(prefix="ds2port-") as tmp:
         payload = Path(tmp) / "payload.tar.gz"
         log("ゲームを検証し、互換修正とMSゴシックを転送用に準備しています。")
-        config = prepare_payload(source, font, profile, port_id, payload)
+        config = prepare_payload(source, font, profile, port_id, payload, input_mode)
         config["runtime_sha256"] = runtime_hash
         r = "/mnt/plumos/ports-runtime/" + port_id
         stage = r + "/.incoming-" + uuid.uuid4().hex

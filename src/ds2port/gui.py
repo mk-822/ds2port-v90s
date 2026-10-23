@@ -20,6 +20,7 @@ class App(ttk.Frame):
         self.events, self.busy = queue.Queue(), False
         self.values = {name: tk.StringVar(value=value) for name, value in {
             "executable": "", "source": "", "host": "", "username": "root",
+            "input_mode": "マウス",
             "password": "", "key": "", "runtime": str(application_dir() / "runtime.tar.gz"),
             "font": str(Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts/msgothic.ttc"),
         }.items()}
@@ -45,6 +46,8 @@ class App(ttk.Frame):
         except ValueError:
             font_text = "このPCでMSゴシックを検出できません。転送にはmsgothic.ttcが必要です。"
         ttk.Label(game, text=font_text, foreground="#555555").grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Label(game, text="起動時モード").grid(row=5, column=0, sticky="w", pady=(10,0))
+        ttk.Combobox(game, textvariable=self.values['input_mode'], values=('マウス','Joypad'), state='readonly').grid(row=5, column=1, columnspan=2, sticky='ew', pady=(10,0))
         device = ttk.LabelFrame(self, text="接続先の本体（Wi-FiとSSHを有効にしてください）", padding=12)
         device.pack(fill="x", pady=12)
         device.columnconfigure(1, weight=1)
@@ -124,7 +127,8 @@ class App(ttk.Frame):
                 profile = detect_game(Path(values['source']), values['executable'] or None)
                 log('起動EXE: ' + profile['executable'] + ' / ' + profile['status'])
                 result = install(connection, Path(values["source"]), Path(values["runtime"]), profile, font=values["font"] or None,
-                                 log=log, progress=lambda value: self.events.put(("progress", value)))
+                                 log=log, progress=lambda value: self.events.put(("progress", value)),
+                                 input_mode='joypad' if values['input_mode']=='Joypad' else 'mouse')
                 if start_after:
                     launch(connection, result)
                 log("転送が完了しました。Portsから「" + profile["launcher"] + "」を選択できます。")
