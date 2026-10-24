@@ -1,49 +1,56 @@
 #!/bin/sh
 set -u
 P=@@PORT@@
-. "$P/env.sh"
+R=@@RUNTIME@@
+C=$R/port
+. "$C/env.sh"
 if [ "${1:-}" = --check ]; then
- for f in "$P/game/"@@EXE@@ "$W/bin/wine" "$P/runtime/box64" "$R/native/bin/Xvfb" "$R/native/bin/fbbridge" "$R/native/bin/sb16-synth" "$P/assets/fonts/msgothic.ttc"; do
+ for f in "$P/game/"@@EXE@@ "$W/bin/wine" "$C/runtime/box64" "$C/runtime/dsfont.dll" "$R/native/bin/Xvfb" "$R/native/bin/fbbridge" "$R/native/bin/sb16-synth" "$C/assets/fonts/msgothic.ttc"; do
   [ -f "$f" ] || { echo "Missing: $f"; exit 1; }
  done
  echo 'DS2PORT_RUNTIME_OK'
  exit 0
 fi
-# Keep the OS cache/registry writable, including Wineboot's first-run growth.
-python3 - "$R" <<'PY' || exit 1
-from pathlib import Path
-import shutil,sys
-runtime=Path(sys.argv[1]);prefix=runtime/'prefix'
-existing=sum(p.stat().st_size for p in prefix.rglob('*') if not p.is_symlink() and p.is_file()) if prefix.exists() else 0
-needed=max(0,640*1024**2-existing)+128*1024**2
-if shutil.disk_usage(runtime).free<needed:
-    sys.exit('Insufficient ext4 space for Wine startup; need %.0f MiB free.'%(needed/1024**2))
-PY
 lock=/run/plumos/ds2port-display93.lock
 mkdir "$lock" 2>/dev/null || { echo 'Another DS2Port game is running'; exit 1; }
 xpid=;spid=;bpid=;gpid=
 cleanup(){
  trap - EXIT HUP INT TERM
  timeout 5 "$R/wineserver-wrapper" -k >/dev/null 2>&1 || true
+ timeout 10 "$R/wineserver-wrapper" -w >/dev/null 2>&1 || true
  for pid in "$gpid" "$bpid" "$spid" "$xpid"; do
   [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
  done
  rm -f "$R/game.pid" "$R/bridge.pid" "$R/synth.pid" "$R/xvfb.pid"
  rm -f "$R/bridge.ready"
+ python3 "$C/prefix_storage.py" unmount "$R" || true
  rmdir "$lock" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'exit 0' HUP INT TERM
-mkdir -p "$P/logs" || exit 1
+[ ! -d "$R/.ds2port-install.lock" ] || { echo "DS2Port installation is in progress"; exit 1; }
+python3 "$C/prefix_storage.py" ensure "$R" || exit 1
+# Keep the OS cache/registry writable, including Wineboot's first-run growth.
+python3 - "$R" <<'PY' || exit 1
+from pathlib import Path
+import shutil,sys
+runtime=Path(sys.argv[1]);prefix=runtime/'prefix'
+existing=sum(p.stat().st_size for p in prefix.rglob('*') if not p.is_symlink() and p.is_file()) if prefix.exists() else 0
+ready=(runtime/'prefix-configured-v2').is_file() and (prefix/'system.reg').is_file()
+needed=(0 if ready else max(0,640*1024**2-existing))+128*1024**2
+if shutil.disk_usage(runtime).free<needed:
+    sys.exit('Insufficient ext4 space for Wine startup; need %.0f MiB free.'%(needed/1024**2))
+PY
+mkdir -p "$R/logs" || exit 1
 # Append avoids deleting FAT chains on every start; logs can be exported from SSH.
-exec >> "$P/logs/launch.log" 2>&1
+exec >> "$R/logs/launch.log" 2>&1
 echo "DS2Port launch $(date -u)"
 if [ -S /tmp/.X11-unix/X93 ]; then echo 'Display 93 is already in use'; exit 1; fi
 unset LD_PRELOAD SDL_HQ_SCALER SDL_ROTATION SDL_BLITTER_DISABLED
 /mnt/plumos/bin/plumos-audio-output prepare || true
 mkdir -p /tmp/.X11-unix
 ln -sfn "$R/native/bin" /tmp/j3b
-Xvfb :93 -screen 0 640x480x24 -xkbdir "$XKB_CONFIG_ROOT" -ac -nolisten tcp -noreset >> "$P/logs/xvfb.log" 2>&1 &
+Xvfb :93 -screen 0 640x480x24 -xkbdir "$XKB_CONFIG_ROOT" -ac -nolisten tcp -noreset >> "$R/logs/xvfb.log" 2>&1 &
 xpid=$!; echo "$xpid" > "$R/xvfb.pid"
 ready=0
 for i in $(seq 1 10); do
@@ -52,7 +59,7 @@ for i in $(seq 1 10); do
 done
 [ "$ready" = 1 ] || { echo 'Xvfb failed'; exit 1; }
 rm -f "$R/bridge.ready"
-DS2PORT_BRIDGE_READY="$R/bridge.ready" fbbridge >> "$P/logs/framebuffer.log" 2>&1 &
+DS2PORT_BRIDGE_READY="$R/bridge.ready" fbbridge >> "$R/logs/framebuffer.log" 2>&1 &
 bpid=$!; echo "$bpid" > "$R/bridge.pid"
 for i in $(seq 1 30); do
  [ -f "$R/bridge.ready" ] && break
@@ -61,27 +68,34 @@ for i in $(seq 1 30); do
 done
 [ -f "$R/bridge.ready" ] || { echo 'Input bridge did not become ready'; exit 1; }
 mkdir -p "$WINEPREFIX/drive_c/windows/Fonts"
-cp "$P/assets/fonts/msgothic.ttc" "$WINEPREFIX/drive_c/windows/Fonts/msgothic.ttc"
+cp "$C/assets/fonts/msgothic.ttc" "$WINEPREFIX/drive_c/windows/Fonts/msgothic.ttc"
 if [ ! -f "$R/prefix-configured-v2" ]; then
  if [ ! -f "$WINEPREFIX/system.reg" ]; then
-  wine_run wineboot.exe --init >> "$P/logs/prefix.log" 2>&1 || true
+  wine_run wineboot.exe --init >> "$R/logs/prefix.log" 2>&1 || true
  fi
  timeout 10 "$R/wineserver-wrapper" -k >/dev/null 2>&1 || true
  timeout 10 "$R/wineserver-wrapper" -w >/dev/null 2>&1 || { echo 'Wine initialization did not stop'; exit 1; }
- python3 "$P/configure_prefix.py" "$WINEPREFIX" >> "$P/logs/prefix.log" 2>&1 || { echo 'Japanese prefix setup failed'; exit 1; }
+ python3 "$C/configure_prefix.py" "$WINEPREFIX" >> "$R/logs/prefix.log" 2>&1 || { echo 'Japanese prefix setup failed'; exit 1; }
  touch "$R/prefix-configured-v2"
 fi
-backend=$(cat "$P/midi-backend" 2>/dev/null || echo opl3)
+# Wineboot writes its first private environment before builtin DLLs are shared.
+python3 "$C/prefix_storage.py" ensure "$R" || exit 1
+# Native Win32 import adapter; copy atomically into this prefix's private layer.
+font_dll="$WINEPREFIX/drive_c/windows/syswow64/dsfont.dll"
+if ! cmp -s "$C/runtime/dsfont.dll" "$font_dll"; then
+ cp "$C/runtime/dsfont.dll" "$font_dll.ds2port-new" && mv "$font_dll.ds2port-new" "$font_dll" || exit 1
+fi
+backend=$(cat "$C/midi-backend" 2>/dev/null || echo opl3)
 if [ "$backend" = soundfont ]; then
- midisynth "$P/assets/TimGM6mb.sf2" >> "$P/logs/midi.log" 2>&1 &
+ ALSA_CONFIG_PATH="$C/asound-fm.conf" midisynth "$C/assets/TimGM6mb.sf2" >> "$R/logs/midi.log" 2>&1 &
 else
- sb16-synth >> "$P/logs/midi.log" 2>&1 &
+ ALSA_CONFIG_PATH="$C/asound-fm.conf" sb16-synth >> "$R/logs/midi.log" 2>&1 &
 fi
 spid=$!; echo "$spid" > "$R/synth.pid"
 sleep 1
 kill -0 "$spid" 2>/dev/null || { echo 'MIDI synth failed'; exit 1; }
 cd "$P/game"
-wine_run @@EXE@@ >> "$P/logs/game.log" 2>&1 &
+wine_run @@EXE@@ >> "$R/logs/game.log" 2>&1 &
 gpid=$!; echo "$gpid" > "$R/game.pid"
 while kill -0 "$gpid" 2>/dev/null && kill -0 "$bpid" 2>/dev/null; do sleep 1; done
 echo "DS2Port stopped $(date -u)"

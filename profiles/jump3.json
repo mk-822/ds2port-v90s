@@ -4,8 +4,8 @@
   "launcher": "JUMPHERO Gaiden 3",
   "executable": "JUMP3.EXE",
   "original_sha256": "5bcd248a7cb713bc2dfb6f12b2c10af8ce0c12c0abf30984d13565e0fcc5c799",
-  "patched_sha256": "9a51bfaab8cf9dbf43946f990ce88245f5af5a687a50973b16889bcc3e169d8e",
-  "patch": "jump3-ms-gothic-common-v2",
+  "patched_sha256": "011b482c0902205be06d5a3df0530531d0337ebe841e8f6d823b6122c1f046f4",
+  "patch": "discstation-common-v2",
   "preserve": [
     "SaveData"
   ],

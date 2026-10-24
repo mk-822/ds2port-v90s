@@ -180,27 +180,56 @@ class Profiles(unittest.TestCase):
         self.assertEqual(original[0x249:0x24f], patched[0x249:0x24f])
         self.assertEqual(patch_common(patched), patched)
 
-    def test_shared_font_initializer_patch_is_specific_and_idempotent(self):
+    def font_fixture(self, creator='CreateFontA'):
         image=bytearray(self.common_fixture())
         struct.pack_into('<IIII',image,0x340,0x1190,0x11b0,0x11d0,0)
-        image[0x3b2:0x3be]=b'CreateFontA\0'
+        name=creator.encode()+b'\0'
+        image[0x3b2:0x3b2+len(name)]=name
         image[0x3d2:0x3e2]=b'GetTextMetricsA\0'
         code=b'\xff\x15'+struct.pack('<I',0x601164)
         code+=b'\x68'+struct.pack('<I',0x601300)+b'\x50\xff\x15'+struct.pack('<I',0x601168)
         code+=b'\x8b\x0d'+struct.pack('<I',0x601300)+b'\x8b\x15'+struct.pack('<I',0x601318)+bytes.fromhex('66 89 56 02')
         image[0x280:0x280+len(code)]=code
-        original=bytes(image);patched=patch_common(original)
-        self.assertEqual(len(Win32Image(patched).sections),2)
-        self.assertEqual(patched[0x280:0x286],original[0x280:0x286])
-        narrowed=patch_common(original,90)
-        self.assertEqual(narrowed[0x280],0xe8)
-        self.assertEqual(patch_common(narrowed,90),narrowed)
-        self.assertEqual(patched[0x28c],0xe8)
+        return bytes(image)
+
+    def test_shared_font_initializer_patch_is_specific_and_idempotent(self):
+        original=self.font_fixture();patched=patch_common(original)
+        pe=Win32Image(patched);imports=pe.imports()
+        self.assertEqual(len(pe.sections),2)
+        self.assertEqual(patched[0x280:0x286],b'\xff\x15'+struct.pack('<I',imports['DS_CreateFontA']))
+        self.assertEqual(patched[0x28c:0x292],b'\xff\x15'+struct.pack('<I',imports['DS_GetTextMetricsA']))
+        for name,address in Win32Image(original).imports().items():self.assertEqual(imports[name],address)
         self.assertEqual(patch_common(patched),patched)
         # A different destination field is not the legacy packed-font layout.
-        image[0x280+len(code)-1]=4
+        image=bytearray(original);image[0x2a1]=4
         ignored=patch_common(bytes(image))
         self.assertEqual(ignored[0x28c:0x292],bytes(image[0x28c:0x292]))
+
+    def test_indirect_font_creation_uses_the_matching_stdcall_export(self):
+        original=self.font_fixture('CreateFontIndirectA');patched=patch_common(original)
+        imports=Win32Image(patched).imports()
+        self.assertIn('DS_CreateFontIndirectA',imports)
+        self.assertNotIn('DS_CreateFontA',imports)
+        self.assertEqual(patched[0x280:0x286],b'\xff\x15'+struct.pack('<I',imports['DS_CreateFontIndirectA']))
+
+    def test_font_import_operands_keep_their_base_relocations(self):
+        original=bytearray(self.font_fixture())
+        struct.pack_into('<II',original,0x98+136,0x11f0,16)
+        struct.pack_into('<IIHHHH',original,0x3f0,0x1000,16,0x3043,0x3082,0x308e,0)
+        patched=patch_common(bytes(original));pe=Win32Image(patched);rebased=bytearray(patched)
+        rva,size=struct.unpack_from('<II',patched,pe.optional+136);pos=pe.offset(rva);end=pos+size
+        while pos<end:
+            page,block=struct.unpack_from('<II',patched,pos)
+            for at in range(pos+8,pos+block,2):
+                entry=struct.unpack_from('<H',patched,at)[0]
+                if entry>>12==3:
+                    target=pe.offset(page+(entry&4095));value=struct.unpack_from('<I',rebased,target)[0]
+                    struct.pack_into('<I',rebased,target,value+0x100000)
+            pos+=block
+        struct.pack_into('<I',rebased,pe.optional+28,pe.base+0x100000)
+        imports=Win32Image(bytes(rebased)).imports()
+        self.assertEqual(struct.unpack_from('<I',rebased,0x282)[0],imports['DS_CreateFontA'])
+        self.assertEqual(struct.unpack_from('<I',rebased,0x28e)[0],imports['DS_GetTextMetricsA'])
 
     def test_common_patch_ignores_callback_outside_code(self):
         original = self.common_fixture(callback=0x9000)
@@ -266,10 +295,11 @@ class Profiles(unittest.TestCase):
         path=folder/profile['executable'];original=path.read_bytes()
         patched=patch_executable(original,profile)
         before,after=Win32Image(original),Win32Image(patched)
-        self.assertEqual(profile['font_width_percent'],90)
+        self.assertNotIn('font_width_percent',profile)
         self.assertIn('savedat1.dat',[name.lower() for name in profile['preserve']])
         self.assertEqual(len(after.sections),len(before.sections)+1)
-        self.assertEqual(after.imports(),before.imports())
+        self.assertTrue(before.imports().items() <= after.imports().items())
+        self.assertIn('DS_CreateFontA',after.imports())
         self.assertEqual(path.read_bytes(),original)
         self.assertEqual(patch_common(patched),patched)
         # Explicit CLI profiles must preserve every non-EXE file too.
@@ -293,7 +323,7 @@ class Profiles(unittest.TestCase):
         source = Path(os.environ['DS2PORT_TEST_FLOAT'])
         profile = detect_game(source)
         self.assertEqual(profile['id'], 'float')
-        self.assertEqual(profile['patch'], 'discstation-common-v1')
+        self.assertEqual(profile['patch'], 'discstation-common-v2')
         self.assertEqual(profile.get('font_width_percent',100),100)
         original = (source / profile['executable']).read_bytes()
         patched = patch_executable(original, profile)
@@ -304,7 +334,7 @@ class Profiles(unittest.TestCase):
         from ds2port.profiles import _font_metric_calls
         for call in _font_metric_calls(original,Win32Image(original),pe.imports()):
             create_offset=call[4]
-            self.assertEqual(patched[create_offset:create_offset+6],original[create_offset:create_offset+6])
+            self.assertEqual(patched[create_offset:create_offset+6],b'\xff\x15'+struct.pack('<I',pe.imports()['DS_CreateFontA']))
         self.assertIn(bytes.fromhex('64a124000000890424'), patched)
         self.assertIn('SAVE_D0.DAT', profile['preserve'])
         with tempfile.TemporaryDirectory() as temp:
@@ -362,7 +392,7 @@ class Profiles(unittest.TestCase):
     def test_runtime_bundle_contains_no_game_or_windows_font(self):
         path=root()/"bld/runtime.tar.gz"
         _,metadata=validate_bundle(path)
-        forbidden={"jump3.exe","jump3.original.exe","float.exe","float.original.exe","ac_mon.exe","ac_mon.original.exe","df3.exe","df3.original.exe","msgothic.ttc"}
+        forbidden={"jump3.exe","jump3.original.exe","float.exe","float.original.exe","ac_mon.exe","ac_mon.original.exe","df3.exe","df3.original.exe", "geo3.exe", "geo3.original.exe", "angler.exe", "angler.original.exe","msgothic.ttc"}
         self.assertFalse(any(Path(name).name.casefold() in forbidden for name in metadata["files"]))
         self.assertIn("native/bin/sb16-synth",metadata["files"])
 

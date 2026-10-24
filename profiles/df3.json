@@ -4,8 +4,7 @@
   "launcher": "DF3",
   "executable": "DF3.exe",
   "original_sha256": "ab71ce91250fb0fdf2843e200f5edef874f931470440aa2ab8cc2cfbbccdf4bb",
-  "patch": "discstation-common-v1",
-  "font_width_percent": 90,
+  "patch": "discstation-common-v2",
   "status": "起動・名前入力・数値表示・マウス操作をPlumOS V90S V2で確認",
-  "patched_sha256": "8c0b57c871dc3c840d2516ddbc96bebf08d592a7b7151b786cbd1fdac7e8379e"
+  "patched_sha256": "ab776684c7b8fe9e8fc9abaee4d7ecad0fe654615ba7a99158fde0c893baa2c0"
 }

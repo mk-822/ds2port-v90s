@@ -1,0 +1,3 @@
+<@@RUNTIME@@/port/asound-core.conf>
+pcm.!default { type asym playback.pcm "jump3_playback" capture.pcm "plughw:0,0" }
+ctl.!default { type hw card 0 }

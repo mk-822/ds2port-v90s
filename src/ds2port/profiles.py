@@ -101,7 +101,7 @@ def detect_game(folder, executable=None):
         ident = 'ds-' + original_hash[:12]
     return {'id': ident, 'title': exe.stem, 'launcher': exe.stem,
             'executable': exe.name, 'original_sha256': original_hash,
-            'patch': 'discstation-common-v1',
+            'patch': 'discstation-common-v2',
             # Unknown engines may store saves alongside data rather than in a
             # dedicated directory. Keep all existing data on subsequent transfers.
             'preserve': [p.name for p in folder.iterdir() if p != exe],
@@ -110,26 +110,60 @@ def detect_game(folder, executable=None):
 
 def _font_metric_calls(data, pe, imports):
     """Recognize the legacy CreateFont/TextMetric-to-packed-font initializer."""
-    create,metrics=imports.get('CreateFontA'),imports.get('GetTextMetricsA')
-    if not create or not metrics:return []
+    metrics=imports.get('GetTextMetricsA')
+    creators={name:imports[name] for name in ('CreateFontA','CreateFontIndirectA') if name in imports}
+    if not creators or not metrics:return []
     calls=[];needle=b'\xff\x15'+struct.pack('<I',metrics)
     for _,size,va,_,raw,flags in pe.sections:
         if not flags&0x20000000:continue
         section=data[raw:raw+size]
         for match in re.finditer(re.escape(needle),section):
             pos=match.start();before=section[max(0,pos-32):pos];after=section[pos+6:pos+86]
-            if b'\xff\x15'+struct.pack('<I',create) not in section[max(0,pos-256):pos]:continue
+            candidates=[(section.rfind(b'\xff\x15'+struct.pack('<I',address),max(0,pos-256),pos),name,address) for name,address in creators.items()]
+            create_pos,create_name,create=max(candidates)
+            if create_pos<0:continue
             for push in re.finditer(rb'\x68(.{4})',before,re.DOTALL):
                 metric=struct.unpack('<I',push.group(1))[0]
                 maximum=rb'(?:\xa1|\x8b[\x05\x0d\x15\x1d\x25\x2d\x35\x3d])'+re.escape(struct.pack('<I',metric+24))
                 height=rb'(?:\xa1|\x8b[\x05\x0d\x15\x1d\x25\x2d\x35\x3d])'+re.escape(struct.pack('<I',metric))
                 if re.search(maximum,after) and re.search(height,after) and re.search(rb'\x66\x89[\x40-\x7f]\x02',after):
-                    create_pos=section.rfind(b'\xff\x15'+struct.pack('<I',create),max(0,pos-256),pos)
-                    calls.append((va+pos,raw+pos,metrics,va+create_pos,raw+create_pos,create));break
+                    calls.append((va+pos,raw+pos,metrics,va+create_pos,raw+create_pos,create,create_name));break
     return calls
 
 
-def _mouse_section(data, pe, hooks, font_calls=(), font_width_percent=100):
+def _font_imports(image, pe, va, code, functions):
+    """Extend imports while retaining every original descriptor and IAT address."""
+    original_rva = struct.unpack_from('<I', image, pe.optional + 104)[0]
+    at = pe.offset(original_rva)
+    descriptors = bytearray()
+    while at + 20 <= len(image):
+        row = image[at:at+20]
+        if not any(row):
+            break
+        if not struct.unpack_from('<I', row, 16)[0]:
+            raise ValueError('PE import descriptor is invalid')
+        descriptors.extend(row)
+        at += 20
+    else:
+        raise ValueError('PE import table has no terminator')
+    code.extend(b'\0' * (-len(code) % 4))
+    table = len(code)
+    code.extend(descriptors + b'\0' * 40)
+    slots = (len(functions) + 1) * 4
+    lookup = len(code); code.extend(b'\0' * slots)
+    iat = len(code); code.extend(b'\0' * slots)
+    dll = len(code); code.extend(b'dsfont.dll\0')
+    for index, name in enumerate(functions):
+        symbol = len(code)
+        code.extend(b'\0\0' + name.encode('ascii') + b'\0')
+        struct.pack_into('<I', code, lookup + index * 4, va + symbol)
+        struct.pack_into('<I', code, iat + index * 4, va + symbol)
+    struct.pack_into('<IIIII', code, table + len(descriptors), va + lookup, 0, 0, va + dll, va + iat)
+    struct.pack_into('<II', image, pe.optional + 104, va + table, len(descriptors) + 40)
+    return {name: pe.base + va + iat + index * 4 for index, name in enumerate(functions)}
+
+
+def _mouse_section(data, pe, hooks, font_calls=()):
     """Append code without moving existing sections or overwriting their data."""
     section_align,file_align=struct.unpack_from('<II',data,pe.optional+32)
     header_size=struct.unpack_from('<I',data,pe.optional+60)[0]
@@ -153,28 +187,14 @@ def _mouse_section(data, pe, hooks, font_calls=(), font_width_percent=100):
         code.extend(stub)
         image[start:start+9]=b'\xe9'+struct.pack('<i',target-source-5)+b'\x90'*4
         ranges.append((source,source+9))
-    for source,start,metrics,create_source,create_start,create in font_calls:
-        if font_width_percent == 90:
-            target=va+len(code)
-            # Preserve font height and weight, shrinking legacy negative-width
-            # SHIFTJIS requests to 90%. Positive per-title widths stay unchanged.
-            body=bytes.fromhex('f7 d8 6b c0 09 83 c0 05 31 d2 b9 0a 00 00 00 f7 f1 f7 d8 89 44 24 08')
-            stub=bytes.fromhex('80 7c 24 24 80 75')+bytes([8+len(body)])
-            stub+=bytes.fromhex('8b 44 24 08 85 c0 79')+bytes([len(body)])+body
-            operand=len(stub)+2
-            stub+=b'\xff\x25'+struct.pack('<I',create)
-            moves[create_source+2]=target+operand
-            ranges.append((create_source,create_source+6));code.extend(stub)
-            image[create_start:create_start+6]=b'\xe8'+struct.pack('<i',target-create_source-5)+b'\x90'
-        target=va+len(code)
-        # stdcall wrapper: preserve EBX/BOOL, forward both arguments, then
-        # constrain oversized SHIFTJIS widths to the smaller of a full-width
-        # average cell and the character height, preserving condensed fonts.
-        stub=bytes.fromhex('53 8b 5c 24 0c ff 74 24 0c ff 74 24 0c ff 15')+struct.pack('<I',metrics)
-        stub+=bytes.fromhex('85 c0 74 1d 80 7b 34 80 75 17 8b 4b 14 85 c9 7e 10 01 c9 3b 0b 7e 02 8b 0b 39 4b 18 7e 03 89 4b 18 5b c2 08 00')
-        moves[source+2]=target+15
-        ranges.append((source,source+6));code.extend(stub)
-        image[start:start+6]=b'\xe8'+struct.pack('<i',target-source-5)+b'\x90'
+    if font_calls:
+        names=tuple(sorted({'DS_'+call[6] for call in font_calls}))+('DS_GetTextMetricsA',)
+        shim = _font_imports(image, pe, va, code, names)
+        for source,start,metrics,create_source,create_start,create,create_name in font_calls:
+            # Keep the six-byte indirect CALL and its original base relocation.
+            # Only its IAT operand changes; the DLL preserves stdcall arguments.
+            image[create_start:create_start+6] = b'\xff\x15'+struct.pack('<I',shim['DS_'+create_name])
+            image[start:start+6] = b'\xff\x15'+struct.pack('<I',shim['DS_GetTextMetricsA'])
 
     # Preserve every existing relocation, moving only callback operands that
     # used to occupy the instructions replaced by JMP. This also supports rebase.
@@ -206,7 +226,7 @@ def _mouse_section(data, pe, hooks, font_calls=(), font_width_percent=100):
             code.extend(table)
     virtual_size=len(code);raw_size=align(virtual_size,file_align)
     image.extend(b'\0'*(raw-len(image)));image.extend(code);image.extend(b'\0'*(raw_size-virtual_size))
-    struct.pack_into('<8sIIIIIIHHI',image,header,b'.dsport\0',virtual_size,va,raw_size,raw,0,0,0,0,0x60000020)
+    struct.pack_into('<8sIIIIIIHHI',image,header,b'.dsport\0',virtual_size,va,raw_size,raw,0,0,0,0,0xe0000020 if font_calls else 0x60000020)
     struct.pack_into('<H',image,pe.pe+6,len(pe.sections)+1)
     struct.pack_into('<I',image,pe.optional+4,struct.unpack_from('<I',data,pe.optional+4)[0]+raw_size)
     struct.pack_into('<I',image,pe.optional+56,align(va+virtual_size,section_align))
@@ -214,14 +234,12 @@ def _mouse_section(data, pe, hooks, font_calls=(), font_width_percent=100):
     return bytes(image)
 
 
-def patch_common(data, font_width_percent=100):
-    if font_width_percent not in (90, 100):
-        raise ValueError('未対応の文字幅補正率です。')
+def patch_common(data):
     pe = Win32Image(data)
     imports=pe.imports();font_calls=_font_metric_calls(data,pe,imports)
     hook_import = imports.get('SetWindowsHookExA')
     if not hook_import:
-        return _mouse_section(data,pe,[],font_calls,font_width_percent) if font_calls else data
+        return _mouse_section(data,pe,[],font_calls) if font_calls else data
     image = bytearray(data)
     # Match the complete hMod=NULL, callback, WH_MOUSE, imported call sequence.
     # Keep the caller's existing thread-ID stack slot and replace its value.
@@ -233,7 +251,7 @@ def patch_common(data, font_width_percent=100):
             callback=struct.unpack('<I',match.group(1))[0]
             if any(pe.base+s[2]<=callback<pe.base+s[2]+s[1] and s[5]&0x20000000 for s in pe.sections):
                 hooks.append((va+match.start(),raw+match.start(),match.group(0)[:9]))
-    if font_calls:return _mouse_section(data,pe,hooks,font_calls,font_width_percent)
+    if font_calls:return _mouse_section(data,pe,hooks,font_calls)
     if not hooks:return data
     for at, size, va, raw_size, raw, flags in pe.sections:
         if not flags & 0x20000000:
@@ -273,22 +291,9 @@ def game_executable(folder: Path, profile: dict) -> Path:
 def patch_executable(data: bytes, profile: dict) -> bytes:
     if digest(data) != profile["original_sha256"]:
         raise ValueError("対応する原本EXEとSHA-256が一致しません。未変更のゲームフォルダーを指定してください。")
-    if profile['patch'] == 'discstation-common-v1':
-        result = patch_common(data, profile.get('font_width_percent', 100))
+    if profile['patch'] in ('discstation-common-v1', 'discstation-common-v2'):
+        result = patch_common(data)
         if profile.get('patched_sha256') and digest(result) != profile['patched_sha256']:
             raise ValueError('修正後EXEの検証に失敗しました。')
         return result
-    if profile["patch"] != "jump3-ms-gothic-common-v2":
-        raise ValueError("未対応の互換修正です。")
-    image = bytearray(data)
-    pe = Win32Image(data)
-    # Keep the user-verified dialogue dimensions; all engine hooks and metrics
-    # use the same recognizer and trampolines as other DiscStation games.
-    at = pe.offset(0x561878 - pe.base)
-    if image[at:at + 4] != bytes.fromhex("eafff8ff"):
-        raise ValueError("会話フォントの修正箇所が想定と異なります。")
-    image[at:at + 4] = struct.pack("<hh", -22, 7)
-    result = patch_common(bytes(image))
-    if digest(result) != profile["patched_sha256"]:
-        raise ValueError("修正後EXEの検証に失敗しました。")
-    return result
+    raise ValueError("未対応の互換修正です。")
