@@ -12,6 +12,7 @@ import sys
 import tarfile
 import time
 import uuid
+from contextlib import contextmanager
 
 
 def sha(path):
@@ -268,7 +269,26 @@ def prepare_cache(description, runtimes=Path('/mnt/plumos/ports-runtime'), ports
             shutil.rmtree(temporary)
 
 
+@contextmanager
+def shared_environment_lock(path=Path('/run/plumos/ds2port-display93.lock')):
+    # Share the launcher's lock so no title can start while the common registry
+    # is being changed. A failed acquisition must never remove someone else's lock.
+    try:
+        path.mkdir()
+    except FileExistsError:
+        raise ValueError('ゲームの起動または別の転送処理が進行中です。終了後に再実行してください。')
+    try:
+        yield
+    finally:
+        path.rmdir()
+
+
 def main(config_path):
+    with shared_environment_lock():
+        install_files(config_path)
+
+
+def install_files(config_path):
     config_path = Path(config_path).resolve()
     config = json.loads(config_path.read_text())
     ident = config["port_id"]
@@ -276,12 +296,13 @@ def main(config_path):
         raise ValueError("Invalid port ID")
     p = Path("/mnt/plumos/roms/ports") / ident
     r = Path("/mnt/plumos/ports-runtime") / ident
+    common = r.parent / '.shared/wine10'
     stage = config_path.parent
     if stage.parent != r or not stage.name.startswith(".incoming-"):
         raise ValueError("Invalid staging path")
     if platform.machine() != "aarch64":
         raise ValueError("This runtime requires aarch64")
-    if p.is_symlink() or r.is_symlink():
+    if p.is_symlink() or r.is_symlink() or common.is_symlink() or (common / 'prefix').is_symlink():
         raise ValueError("Port root must not be a symbolic link")
     if Path("/tmp/.X11-unix/X93").exists():
         raise ValueError("先に起動中のゲームを終了してください。")
@@ -338,7 +359,7 @@ def main(config_path):
         if dest.is_symlink() or any(x.is_symlink() for x in dest.parents if x not in (Path('/'),)):
             # /mnt/plumos/roms may itself be a normal system symlink; roots were
             # checked above. Only descendants of the per-port roots are restricted.
-            for root in (p, r):
+            for root in (p, r, common):
                 if dest.is_relative_to(root) and any((root / Path(*dest.relative_to(root).parts[:i])).is_symlink() for i in range(1, len(dest.relative_to(root).parts) + 1)):
                     raise ValueError("Managed destination contains a link: " + str(dest))
         if dest.is_file() and sha(dest) == sha(source):
@@ -365,9 +386,11 @@ def main(config_path):
         p.mkdir(parents=True, exist_ok=True)
         existing_game = (p / "game").exists()
         existing_roots = {child.name.casefold() for child in (p / "game").iterdir()} if existing_game else set()
-        storage = r / 'port/prefix_storage.py'
+        storage = payload / 'port/prefix_storage.py'
         if storage.is_file() and (r / 'prefix-storage.json').is_file():
             subprocess.run(['python3', str(storage), 'unmount', str(r)], check=True)
+        if storage.is_file() and (common / 'prefix-storage.json').is_file():
+            subprocess.run(['python3', str(storage), 'unmount', str(common)], check=True)
         for name in ("native", "wine-10.0-amd64-wow64", "licenses"):
             dest = r / name
             if same_tree(runtime / name, dest):
@@ -406,7 +429,7 @@ def main(config_path):
         install_file(cache_reference, r / 'shared-runtime.json')
         install_file(payload / "launcher.sh", p.parent / launcher)
         # Existing Japanese Noto replacements must be cleared with Wine stopped.
-        user_reg = r / "prefix/user.reg"
+        user_reg = (common if (common / 'prefix/user.reg').is_file() else r) / "prefix/user.reg"
         if user_reg.exists():
             content = user_reg.read_text()
             for face in ("MS Gothic", "MS PGothic", "MS UI Gothic"):

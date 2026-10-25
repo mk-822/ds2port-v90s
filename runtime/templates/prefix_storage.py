@@ -70,6 +70,7 @@ def mount_record(target):
 
 
 def layout(runtime):
+    runtimes = runtime.parent.parent if runtime.parent.name == '.shared' else runtime.parent
     state = runtime / 'prefix-storage.json'
     if state.exists():
         value = json.loads(state.read_text())
@@ -80,7 +81,7 @@ def layout(runtime):
         shared = runtime / 'shared-runtime.json'
         if shared.exists():
             cache = Path(json.loads(shared.read_text())['path'])
-            if cache.parent != runtime.parent / '.shared' or not re.fullmatch('runtime-[0-9a-f]{64}', cache.name):
+            if cache.parent != runtimes / '.shared' or not re.fullmatch('runtime-[0-9a-f]{64}', cache.name):
                 raise RuntimeError('Invalid shared runtime path')
             lower = cache / 'wine-10.0-amd64-wow64'
         else:
@@ -90,7 +91,7 @@ def layout(runtime):
         temporary.write_text(json.dumps({'schema': 1, 'wine': str(lower)}))
         temporary.replace(state)
     allowed = (lower == runtime / 'wine-10.0-amd64-wow64' or
-               (lower.parent.parent == runtime.parent / '.shared' and
+               (lower.parent.parent == runtimes / '.shared' and
                 re.fullmatch('runtime-[0-9a-f]{64}', lower.parent.name) and
                 lower.name == 'wine-10.0-amd64-wow64'))
     if not allowed:
@@ -150,7 +151,9 @@ def unmount(runtime):
 
 if __name__ == '__main__':
     runtime = Path(sys.argv[2])
-    if runtime.parent != Path('/mnt/plumos/ports-runtime') or not re.fullmatch('[a-z][a-z0-9-]{0,39}', runtime.name):
+    base = Path('/mnt/plumos/ports-runtime')
+    if not (runtime == base / '.shared/wine10' or
+            (runtime.parent == base and re.fullmatch('[a-z][a-z0-9-]{0,39}', runtime.name))):
         raise RuntimeError('Invalid managed runtime path')
     import fcntl
     with (runtime / 'prefix-storage.lock').open('a') as lock:

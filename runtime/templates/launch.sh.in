@@ -23,20 +23,21 @@ cleanup(){
  done
  rm -f "$R/game.pid" "$R/bridge.pid" "$R/synth.pid" "$R/xvfb.pid"
  rm -f "$R/bridge.ready"
- python3 "$C/prefix_storage.py" unmount "$R" || true
+ [ ! -d "$S" ] || python3 "$C/prefix_storage.py" unmount "$S" || true
  rmdir "$lock" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'exit 0' HUP INT TERM
 [ ! -d "$R/.ds2port-install.lock" ] || { echo "DS2Port installation is in progress"; exit 1; }
-python3 "$C/prefix_storage.py" ensure "$R" || exit 1
+python3 "$C/common_prefix.py" "$R" || exit 1
+python3 "$C/prefix_storage.py" ensure "$S" || exit 1
 # Keep the OS cache/registry writable, including Wineboot's first-run growth.
-python3 - "$R" <<'PY' || exit 1
+python3 - "$S" <<'PY' || exit 1
 from pathlib import Path
 import shutil,sys
 runtime=Path(sys.argv[1]);prefix=runtime/'prefix'
 existing=sum(p.stat().st_size for p in prefix.rglob('*') if not p.is_symlink() and p.is_file()) if prefix.exists() else 0
-ready=(runtime/'prefix-configured-v2').is_file() and (prefix/'system.reg').is_file()
+ready=(runtime/'prefix-configured-v2').is_file() and all((prefix/name).is_file() for name in ('system.reg','user.reg'))
 needed=(0 if ready else max(0,640*1024**2-existing))+128*1024**2
 if shutil.disk_usage(runtime).free<needed:
     sys.exit('Insufficient ext4 space for Wine startup; need %.0f MiB free.'%(needed/1024**2))
@@ -68,18 +69,18 @@ for i in $(seq 1 30); do
 done
 [ -f "$R/bridge.ready" ] || { echo 'Input bridge did not become ready'; exit 1; }
 mkdir -p "$WINEPREFIX/drive_c/windows/Fonts"
-cp "$C/assets/fonts/msgothic.ttc" "$WINEPREFIX/drive_c/windows/Fonts/msgothic.ttc"
-if [ ! -f "$R/prefix-configured-v2" ]; then
- if [ ! -f "$WINEPREFIX/system.reg" ]; then
-  wine_run wineboot.exe --init >> "$R/logs/prefix.log" 2>&1 || true
- fi
+if ! cmp -s "$C/assets/fonts/msgothic.ttc" "$WINEPREFIX/drive_c/windows/Fonts/msgothic.ttc"; then
+ cp "$C/assets/fonts/msgothic.ttc" "$WINEPREFIX/drive_c/windows/Fonts/msgothic.ttc"
+fi
+if [ ! -f "$S/prefix-configured-v2" ] || [ ! -f "$WINEPREFIX/system.reg" ] || [ ! -f "$WINEPREFIX/user.reg" ]; then
+ wine_run wineboot.exe --init >> "$R/logs/prefix.log" 2>&1 || true
  timeout 10 "$R/wineserver-wrapper" -k >/dev/null 2>&1 || true
  timeout 10 "$R/wineserver-wrapper" -w >/dev/null 2>&1 || { echo 'Wine initialization did not stop'; exit 1; }
  python3 "$C/configure_prefix.py" "$WINEPREFIX" >> "$R/logs/prefix.log" 2>&1 || { echo 'Japanese prefix setup failed'; exit 1; }
- touch "$R/prefix-configured-v2"
+ touch "$S/prefix-configured-v2"
 fi
 # Wineboot writes its first private environment before builtin DLLs are shared.
-python3 "$C/prefix_storage.py" ensure "$R" || exit 1
+python3 "$C/prefix_storage.py" ensure "$S" || exit 1
 # Native Win32 import adapter; copy atomically into this prefix's private layer.
 font_dll="$WINEPREFIX/drive_c/windows/syswow64/dsfont.dll"
 if ! cmp -s "$C/runtime/dsfont.dll" "$font_dll"; then

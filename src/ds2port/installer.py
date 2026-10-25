@@ -103,7 +103,7 @@ def prepare_payload(source, font, profile, port_id, output, input_mode="mouse"):
         for name in ("env.sh", "launch.sh", "fonts.conf", "asound.conf", "asound-core.conf", "asound-fm.conf"):
             add_bytes(tf, "port/" + name, render_template(name + ".in", replacements), name.endswith(".sh"))
         add_bytes(tf, "port/japanese.reg", (root() / "runtime/templates/japanese.reg").read_bytes())
-        for name in ('configure_prefix.py', 'prefix_storage.py'):
+        for name in ('configure_prefix.py', 'prefix_storage.py', 'common_prefix.py'):
             add_bytes(tf, 'port/' + name, (root() / 'runtime/templates' / name).read_bytes())
         add_bytes(tf, "port/midi-backend", b"opl3\n")
         add_bytes(tf, "port/input-mode", (input_mode+'\n').encode('ascii'))
@@ -120,18 +120,24 @@ def inspect_device(connection):
 roots=['/mnt/plumos/roms/ports','/mnt/plumos']
 from pathlib import Path
 prefix_bytes={p.parent.name:sum(f.stat().st_size for f in p.rglob('*') if f.is_file() and not f.is_symlink()) for p in Path('/mnt/plumos/ports-runtime').glob('*/prefix')}
-ready=[p.name for p in Path('/mnt/plumos/ports-runtime').iterdir() if (p/'prefix-configured-v2').is_file() and (p/'prefix/system.reg').is_file()]
-print(json.dumps({'arch':platform.machine(),'uid':os.geteuid(),'plumos':os.path.isfile('/mnt/plumos/bin/plumos-portmaster-port-launch'),'prefix_bytes':prefix_bytes,'prefix_ready':ready,'roots':{p:{'free':shutil.disk_usage(p).free,'readonly':bool(os.statvfs(p).f_flag & os.ST_RDONLY)} for p in roots}}))
+ready=[p.name for p in Path('/mnt/plumos/ports-runtime').iterdir() if (p/'prefix-configured-v2').is_file() and (p/'prefix/system.reg').is_file() and (p/'prefix/user.reg').is_file()]
+common=Path('/mnt/plumos/ports-runtime/.shared/wine10')
+shared_ready=(common/'prefix-configured-v2').is_file() and (common/'prefix/system.reg').is_file() and (common/'prefix/user.reg').is_file()
+seed_bytes=max((prefix_bytes.get(name,0)+sum(f.stat().st_size for f in (Path('/mnt/plumos/ports-runtime')/name/'prefix-overlays').rglob('*') if f.is_file() and not f.is_symlink()) for name in ready),default=0)
+shared_bytes=sum(f.stat().st_size for f in (common/'prefix').rglob('*') if f.is_file() and not f.is_symlink()) if (common/'prefix').exists() else 0
+print(json.dumps({'arch':platform.machine(),'uid':os.geteuid(),'plumos':os.path.isfile('/mnt/plumos/bin/plumos-portmaster-port-launch'),'prefix_bytes':prefix_bytes,'prefix_ready':ready,'shared_prefix_ready':shared_ready,'shared_prefix_bytes':shared_bytes,'shared_environment_exists':common.exists(),'shared_prefix_seed_bytes':seed_bytes,'roots':{p:{'free':shutil.disk_usage(p).free,'readonly':bool(os.statvfs(p).f_flag & os.ST_RDONLY)} for p in roots}}))
 """
     return json.loads(connection.run("python3 -c " + shlex.quote(script)))
 
 
-def required_ext4_bytes(unpacked, archive_bytes, game_bytes, existing_prefix_bytes=0, runtime_cached=False, prefix_ready=False):
+def required_ext4_bytes(unpacked, archive_bytes, game_bytes, existing_prefix_bytes=0, runtime_cached=False, prefix_ready=False, shared_prefix_seed_bytes=0):
     # Wineboot creates ~565 MiB on this runtime. Reserve it before transfer,
     # including the missing part of an initialization interrupted by ENOSPC.
     prefix_growth=0 if prefix_ready else max(0,640*1024**2-existing_prefix_bytes)
     runtime_growth=0 if runtime_cached else unpacked+archive_bytes
-    return runtime_growth+game_bytes*3+prefix_growth+160*1024**2
+    # Seeding reuses immutable DLLs, while reserving private settings/font copies.
+    seed_growth=max(0,shared_prefix_seed_bytes)
+    return runtime_growth+game_bytes*3+prefix_growth+seed_growth+160*1024**2
 
 
 def install(connection, source, runtime, profile, font=None, port_id=None, log=print, progress=lambda value: None, input_mode="mouse"):
@@ -154,7 +160,7 @@ def install(connection, source, runtime, profile, font=None, port_id=None, log=p
         log("ゲームを検証し、互換修正とMSゴシックを転送用に準備しています。")
         config = prepare_payload(source, font, profile, port_id, payload, input_mode)
         config["runtime_sha256"] = runtime_hash
-        config['tool_version'] = '0.1.2'
+        config['tool_version'] = '0.1.4'
         r = "/mnt/plumos/ports-runtime/" + port_id
         stage = r + "/.incoming-" + uuid.uuid4().hex
         lock = r + "/.ds2port-install.lock"
@@ -171,7 +177,11 @@ def install(connection, source, runtime, profile, font=None, port_id=None, log=p
             output = connection.run('python3 ' + q(stage + '/install.py') + ' --cache ' + q(stage + '/cache.json'), timeout=1200)
             cached = json.loads(next(line.split(' ', 1)[1] for line in output.splitlines() if line.startswith('DS2PORT_CACHE_RESULT ')))
             status = inspect_device(connection)
-            needed=required_ext4_bytes(unpacked,Path(runtime).stat().st_size,game_size,status.get('prefix_bytes',{}).get(port_id,0),cached['ready'],port_id in status.get('prefix_ready',[]))
+            legacy_ready=bool(status.get('prefix_ready')) and not status.get('shared_environment_exists',False)
+            shared_ready=status.get('shared_prefix_ready',False)
+            needed=required_ext4_bytes(unpacked,Path(runtime).stat().st_size,game_size,
+                                      status.get('shared_prefix_bytes',0),cached['ready'],
+                                      shared_ready or legacy_ready,status.get('shared_prefix_seed_bytes',0) if legacy_ready and not shared_ready else 0)
             if status['roots']['/mnt/plumos']['free'] < needed:
                 raise ValueError(f'ext4領域の空き容量が不足しています。共有後の転送一時領域とWine初回起動分を含め、約{needed/1024**3:.2f}GiB必要です。')
             if cached['ready']:
