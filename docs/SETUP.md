@@ -41,7 +41,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1
 | `bld/dist/DS2PortV90S/DS2PortV90S.exe` | Windows GUI |
 | `bld/dist/DS2PortV90S/DS2PortCLI.exe` | コンソール版 |
 | `bld/runtime.tar.gz` | 実機ランタイム |
-| `bld/dist/ds2port-v90s-0.1.2-windows-x64.zip` | ローカルの配布候補 |
+| `bld/dist/ds2port-v90s-0.1.3-windows-x64.zip` | ローカルの配布候補 |
 
 依存アーカイブは `runtime/dependencies.json` のSHA-256で照合します。ゲーム・フォント・資格情報・ビルド環境・生成バイナリをGitへ追加しないでください。
 

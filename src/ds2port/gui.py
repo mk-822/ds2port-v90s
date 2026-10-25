@@ -1,4 +1,3 @@
-import json
 import os
 from pathlib import Path
 import queue
@@ -8,6 +7,7 @@ from tkinter import filedialog, messagebox, ttk
 from .installer import install, inspect_device, launch, windows_font
 from .profiles import detect_game, executables
 from .resources import application_dir
+from .settings import load_connection_settings, save_connection_settings
 from .ssh import Connection, UnknownHostKey, trust_host
 
 
@@ -24,6 +24,10 @@ class App(ttk.Frame):
             "password": "", "key": "", "runtime": str(application_dir() / "runtime.tar.gz"),
             "font": str(Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts/msgothic.ttc"),
         }.items()}
+        saved = load_connection_settings()
+        for name in ("host", "username", "password"):
+            self.values[name].set(saved[name])
+        self.save_password = tk.BooleanVar(value=saved["save_password"])
         self.start_after = tk.BooleanVar(value=False)
         self._build()
         self.values['source'].trace_add('write', self._source_changed)
@@ -54,7 +58,9 @@ class App(ttk.Frame):
         for row, (name, title) in enumerate((("host", "IPアドレス"), ("username", "SSHユーザー"), ("password", "パスワード"))):
             ttk.Label(device, text=title).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=5)
             ttk.Entry(device, textvariable=self.values[name], show="•" if name == "password" else "").grid(row=row, column=1, columnspan=2, sticky="ew")
-        self._path_row(device, 3, "秘密鍵（任意）", "key", False)
+        ttk.Checkbutton(device, text="SSHパスワードを保存する", variable=self.save_password).grid(
+            row=3, column=1, columnspan=2, sticky="w", pady=(0, 5))
+        self._path_row(device, 4, "秘密鍵（任意）", "key", False)
         actions = ttk.Frame(self)
         actions.pack(fill="x", pady=(0, 10))
         ttk.Checkbutton(actions, text="転送完了後に本体で起動する", variable=self.start_after).pack(side="left")
@@ -64,7 +70,7 @@ class App(ttk.Frame):
         self.install_button.pack(side="right")
         self.progress = ttk.Progressbar(self, maximum=100)
         self.progress.pack(fill="x")
-        self.status = ttk.Label(self, text="準備できました。パスワードは保存しません。", anchor="w")
+        self.status = ttk.Label(self, text="準備できました。", anchor="w")
         self.status.pack(fill="x", pady=7)
         log_frame = ttk.Frame(self)
         log_frame.pack(fill="both", expand=True)
@@ -175,6 +181,11 @@ class App(ttk.Frame):
         if self.busy:
             messagebox.showinfo("処理中", "転送・配置処理が完了してから閉じてください。", parent=self)
         else:
+            try:
+                save_connection_settings(self.values["host"].get(), self.values["username"].get(),
+                                         self.values["password"].get(), self.save_password.get())
+            except OSError as error:
+                messagebox.showwarning("接続情報の保存", f"接続情報を保存できませんでした。\n{error}", parent=self)
             self.master.destroy()
 
 
