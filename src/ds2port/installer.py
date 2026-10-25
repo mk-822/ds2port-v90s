@@ -37,6 +37,13 @@ def font_shim():
     raise ValueError('dsfont.dllがありません。scripts/build-font-shim.ps1で互換DLLを作成してください。')
 
 
+def audio_shim():
+    for path in (root() / 'runtime/win32/dsound.dll', root() / 'bld/win32/dsound.dll'):
+        if path.is_file():
+            return path
+    raise ValueError('dsound.dllがありません。scripts/build-audio-shim.ps1で音声DLLを作成してください。')
+
+
 def validate_bundle(path):
     path = Path(path)
     checksum = path.with_name(path.name + ".sha256")
@@ -65,8 +72,8 @@ def prepare_payload(source, font, profile, port_id, output, input_mode="mouse"):
     """Read user files without changing the source, including the original EXE."""
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", port_id):
         raise ValueError("Invalid port ID")
-    if input_mode not in ('mouse','joypad'):
-        raise ValueError('起動時モードはmouseまたはjoypadを指定してください。')
+    if input_mode not in ('mouse','joypad','keyboard'):
+        raise ValueError('起動時モードはmouse、joypad、keyboardを指定してください。')
     source = Path(source).resolve()
     executable = game_executable(source, profile)
     original = executable.read_bytes()
@@ -100,6 +107,7 @@ def prepare_payload(source, font, profile, port_id, output, input_mode="mouse"):
         add_bytes(tf, "game/" + backup_name, original)
         add_bytes(tf, "port/assets/fonts/msgothic.ttc", font.read_bytes())
         add_bytes(tf, 'port/runtime/dsfont.dll', font_shim().read_bytes())
+        add_bytes(tf, 'port/runtime/dsound.dll', audio_shim().read_bytes())
         for name in ("env.sh", "launch.sh", "fonts.conf", "asound.conf", "asound-core.conf", "asound-fm.conf"):
             add_bytes(tf, "port/" + name, render_template(name + ".in", replacements), name.endswith(".sh"))
         add_bytes(tf, "port/japanese.reg", (root() / "runtime/templates/japanese.reg").read_bytes())
@@ -160,7 +168,7 @@ def install(connection, source, runtime, profile, font=None, port_id=None, log=p
         log("ゲームを検証し、互換修正とMSゴシックを転送用に準備しています。")
         config = prepare_payload(source, font, profile, port_id, payload, input_mode)
         config["runtime_sha256"] = runtime_hash
-        config['tool_version'] = '0.1.4'
+        config['tool_version'] = '0.1.5'
         r = "/mnt/plumos/ports-runtime/" + port_id
         stage = r + "/.incoming-" + uuid.uuid4().hex
         lock = r + "/.ds2port-install.lock"

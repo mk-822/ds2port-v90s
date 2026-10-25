@@ -6,6 +6,9 @@ folder=root/'bld/dist/DS2PortV90S'
 for name in ('README.md','THIRD_PARTY.md','LICENSE','NOTICE'):
     shutil.copyfile(root/name,folder/name)
 shutil.copytree(root/'docs',folder/'docs',dirs_exist_ok=True)
+shutil.copytree(root/'bld/win32/dsound-licenses',folder/'licenses/Wine-dsound',dirs_exist_ok=True)
+for source in (root/'bld/win32/dsound.json',root/'runtime/audio-source.json',root/'runtime/patches/wine10-dsound-optimized.patch'):
+    shutil.copyfile(source,folder/'licenses/Wine-dsound'/source.name)
 license_dir=folder/'licenses/python'
 versions={}
 for distribution in importlib.metadata.distributions():

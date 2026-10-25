@@ -14,6 +14,8 @@ tar xzf bld/cache/adlmidi-source.tar.gz -C "$adlsrc" --strip-components=1
 cmake -S "$adlsrc" -B /work/bld/adl-build -DCMAKE_BUILD_TYPE=Release -DWITH_MIDI_SEQUENCER=OFF -DUSE_NUKED_EMULATOR=OFF -DUSE_OPAL_EMULATOR=OFF -DUSE_JAVA_EMULATOR=OFF -DUSE_DOSBOX_EMULATOR=ON -DlibADLMIDI_STATIC=ON -DlibADLMIDI_SHARED=OFF
 cmake --build /work/bld/adl-build -j4
 gcc -O2 runtime/native/fbbridge.c -o "$native/bin/fbbridge" -lX11 -lXext -ldl
+gcc -O2 -Iruntime/native tests/input-mode.c -o "$build/input-mode-test"
+"$build/input-mode-test"
 gcc -O2 runtime/native/xctl.c -o "$native/bin/xctl" -lX11 -ldl
 gcc -O2 runtime/native/midisynth.c -o "$native/bin/midisynth" -ldl
 gcc -shared -fPIC -DPIC -O2 runtime/native/pcm_jump3_volume.c -o "$native/lib/libasound_module_pcm_jump3_volume.so" -lasound

@@ -1,0 +1,7 @@
+FROM debian:bookworm-slim
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential bison flex python3 patch pkg-config ca-certificates \
+    gcc-mingw-w64-i686-posix gcc-mingw-w64-x86-64-posix \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /work

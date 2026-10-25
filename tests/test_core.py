@@ -7,6 +7,7 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 from ds2port.installer import prepare_payload, render_template, validate_bundle, required_ext4_bytes
 from ds2port.profiles import digest, game_executable, patch_executable, profiles, detect_game, Win32Image, patch_common
 from ds2port.resources import root
@@ -140,6 +141,25 @@ class ArchiveSafety(unittest.TestCase):
 
 
 class Profiles(unittest.TestCase):
+    def test_all_input_modes_are_preserved_in_the_transfer_payload(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            source = folder / 'game'
+            source.mkdir()
+            (source / 'fixture.exe').write_bytes(self.common_fixture())
+            profile = detect_game(source)
+            font = folder / 'test-font'
+            font.write_bytes(b'test-only resource')
+            with patch('ds2port.installer.windows_font', return_value=font), patch('ds2port.installer.font_shim', return_value=font), patch('ds2port.installer.audio_shim', return_value=font):
+                for mode in ('mouse', 'joypad', 'keyboard'):
+                    with self.subTest(mode=mode):
+                        output = folder / (mode + '.tar.gz')
+                        config = prepare_payload(source, font, profile, 'fixture', output, input_mode=mode)
+                        self.assertEqual(config['input_mode'], mode)
+                        with tarfile.open(output) as archive:
+                            self.assertEqual(archive.extractfile('port/input-mode').read(), (mode + '\n').encode())
+                            self.assertEqual(archive.extractfile('port/runtime/dsound.dll').read(), font.read_bytes())
+
     def test_invalid_input_mode_does_not_create_payload(self):
         with tempfile.TemporaryDirectory() as temp:
             output=Path(temp)/'payload.tar.gz'

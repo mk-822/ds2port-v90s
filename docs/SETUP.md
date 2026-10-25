@@ -26,7 +26,7 @@ Wine環境をバックアップする場合は、ゲーム・セーブのフォ�
 
 ## ソースからビルド
 
-Windows x64、Python 3.11以上、Docker DesktopのLinuxコンテナー環境が必要です。ARM64コンテナーのエミュレーションを使用します。
+Windows x64、Python 3.11以上、Docker DesktopのLinuxコンテナー環境が必要です。ARM64コンテナーのエミュレーションを使用します。音声DLLのビルドにはAMD64コンテナーも使用します。
 
 ```powershell
 git clone https://github.com/mk-822/ds2port-v90s.git
@@ -42,7 +42,9 @@ powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1
 | `bld/dist/DS2PortV90S/DS2PortV90S.exe` | Windows GUI |
 | `bld/dist/DS2PortV90S/DS2PortCLI.exe` | コンソール版 |
 | `bld/runtime.tar.gz` | 実機ランタイム |
-| `bld/dist/ds2port-v90s-0.1.4-windows-x64.zip` | ローカルの配布候補 |
+| `bld/win32/dsound.dll` | 共通の音声最適化DLL |
+| `bld/dist/ds2port-v90s-0.1.5-dsound-source.tar.gz` | 音声DLLの対応ソース |
+| `bld/dist/ds2port-v90s-0.1.5-windows-x64.zip` | ローカルの配布候補 |
 
 依存アーカイブは `runtime/dependencies.json` のSHA-256で照合します。ゲーム・フォント・資格情報・ビルド環境・生成バイナリをGitへ追加しないでください。
 

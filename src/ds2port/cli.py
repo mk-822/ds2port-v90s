@@ -24,7 +24,7 @@ def main(argv=None):
     parser.add_argument("--executable", help="ゲームフォルダー内の起動EXE名。複数ある場合に指定")
     parser.add_argument("--port-id", help="検証用の別配置ID。通常は省略")
     parser.add_argument("--launch", action="store_true")
-    parser.add_argument("--input-mode", choices=('mouse','joypad'), default='mouse', help='起動時の入力モード')
+    parser.add_argument("--input-mode", choices=('mouse','joypad','keyboard'), default='mouse', help='起動時の入力モード')
     args = parser.parse_args(argv)
     options = dict(host=args.host, username=args.user, password=os.environ.get(args.password_env, ""),
                    port=args.port, key_filename=args.key)

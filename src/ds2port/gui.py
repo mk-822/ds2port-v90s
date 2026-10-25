@@ -51,7 +51,7 @@ class App(ttk.Frame):
             font_text = "このPCでMSゴシックを検出できません。転送にはmsgothic.ttcが必要です。"
         ttk.Label(game, text=font_text, foreground="#555555").grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
         ttk.Label(game, text="起動時モード").grid(row=5, column=0, sticky="w", pady=(10,0))
-        ttk.Combobox(game, textvariable=self.values['input_mode'], values=('マウス','Joypad'), state='readonly').grid(row=5, column=1, columnspan=2, sticky='ew', pady=(10,0))
+        ttk.Combobox(game, textvariable=self.values['input_mode'], values=('マウス','Joypad','キーボード'), state='readonly').grid(row=5, column=1, columnspan=2, sticky='ew', pady=(10,0))
         device = ttk.LabelFrame(self, text="接続先の本体（Wi-FiとSSHを有効にしてください）", padding=12)
         device.pack(fill="x", pady=12)
         device.columnconfigure(1, weight=1)
@@ -134,7 +134,7 @@ class App(ttk.Frame):
                 log('起動EXE: ' + profile['executable'] + ' / ' + profile['status'])
                 result = install(connection, Path(values["source"]), Path(values["runtime"]), profile, font=values["font"] or None,
                                  log=log, progress=lambda value: self.events.put(("progress", value)),
-                                 input_mode='joypad' if values['input_mode']=='Joypad' else 'mouse')
+                                 input_mode={'マウス':'mouse','Joypad':'joypad','キーボード':'keyboard'}[values['input_mode']])
                 if start_after:
                     launch(connection, result)
                 log("転送が完了しました。Portsから「" + profile["launcher"] + "」を選択できます。")

@@ -1,0 +1,191 @@
+--- a/dlls/dsound/mixer.c
++++ b/dlls/dsound/mixer.c
+@@ -24,6 +24,7 @@
+ 
+ #include <assert.h>
+ #include <stdarg.h>
++#include <xmmintrin.h>
+ #include <math.h>	/* Insomnia - pow() function */
+ 
+ #define COBJMACROS
+@@ -282,7 +283,21 @@
+ {
+     if (mixpos >= buflen && !(dsb->playflags & DSBPLAY_LOOPING))
+         return 0.0f;
+-    return dsb->get(dsb, buffer + (mixpos % buflen), channel);
++    buffer += mixpos % buflen;
++    if (dsb->get == getbpp[0]) return (buffer[channel] - 128) * (1.0f / 128.0f);
++    if (dsb->get == getbpp[1]) return ((const SHORT *)buffer)[channel] * (1.0f / 32768.0f);
++    if (dsb->get == getbpp[4]) return ((const float *)buffer)[channel];
++    return dsb->get(dsb, buffer, channel);
++}
++
++/* Avoid per-sample indirect calls (and x87 ABI crossings) for plain PCM. */
++static inline void put_current_sample(const IDirectSoundBufferImpl *dsb, DWORD pos, DWORD channel, float value)
++{
++    float *out = (float *)((BYTE *)dsb->device->tmp_buffer + pos);
++    if (dsb->put == putieee32) out[channel] = value;
++    else if (dsb->put == put_mono2stereo && dsb->put_aux == putieee32)
++        out[0] = out[1] = value;
++    else dsb->put(dsb, pos, channel, value);
+ }
+ 
+ static UINT cp_fields_noresample(IDirectSoundBufferImpl *dsb, UINT count)
+@@ -302,15 +317,53 @@
+ 
+     for (i = 0; i < committed_samples; i++)
+         for (channel = 0; channel < dsb->mix_channels; channel++)
+-            dsb->put(dsb, i * ostride, channel, get_current_sample(dsb, dsb->committedbuff,
++            put_current_sample(dsb, i * ostride, channel, get_current_sample(dsb, dsb->committedbuff,
+                 dsb->writelead, dsb->committed_mixpos + i * istride, channel));
+ 
+     for (; i < count; i++)
+         for (channel = 0; channel < dsb->mix_channels; channel++)
+-            dsb->put(dsb, i * ostride, channel, get_current_sample(dsb, dsb->buffer->memory,
++            put_current_sample(dsb, i * ostride, channel, get_current_sample(dsb, dsb->buffer->memory,
+                 dsb->buflen, dsb->sec_mixpos + i * istride, channel));
+ 
+     return count;
++}
++
++static UINT gcd_rate(UINT a, UINT b)
++{
++    while (b) { UINT remainder = a % b; a = b; b = remainder; }
++    return a;
++}
++
++static float *get_phase_cache(IDirectSoundBufferImpl *dsb, UINT stride, UINT divisor, UINT residue)
++{
++    UINT period = dsb->freqAdjustDen / divisor, phase, index, used, k;
++    float *table;
++    if (dsb->fir_phase_cache && dsb->fir_phase_num == dsb->freqAdjustNum &&
++        dsb->fir_phase_den == dsb->freqAdjustDen && dsb->fir_phase_step == dsb->firstep &&
++        dsb->fir_phase_residue == residue) return dsb->fir_phase_cache;
++    free(dsb->fir_phase_cache);
++    dsb->fir_phase_cache = NULL;
++    /* Bound per-voice storage to 1 MiB; uncommon pitch ratios use the stock path. */
++    if (period > 1024 || stride > 262144 / period) return NULL;
++    table = malloc((SIZE_T)period * stride * sizeof(float));
++    if (!table) return NULL;
++    for (phase = 0; phase < period; phase++)
++    {
++        UINT64 product = ((UINT64)phase * divisor + residue) * dsb->firstep;
++        UINT steps = product / dsb->freqAdjustDen;
++        float rem = steps + 1.0f - product / (float)dsb->freqAdjustDen;
++        float *row = table + phase * stride;
++        index = dsb->firstep - steps - 1;
++        used = 0;
++        for (k = index; k < fir_len - 1; k += dsb->firstep)
++            row[1 + used++] = fir[k] * (1.0f - rem) + fir[k + 1] * rem;
++        row[0] = used;
++    }
++    dsb->fir_phase_num = dsb->freqAdjustNum;
++    dsb->fir_phase_den = dsb->freqAdjustDen;
++    dsb->fir_phase_step = dsb->firstep;
++    dsb->fir_phase_residue = residue;
++    return dsb->fir_phase_cache = table;
+ }
+ 
+ static UINT cp_fields_resample(IDirectSoundBufferImpl *dsb, UINT count, LONG64 *freqAccNum)
+@@ -327,6 +380,12 @@
+     UINT max_ipos = (freqAcc_start + count * dsb->freqAdjustNum) / dsb->freqAdjustDen;
+ 
+     UINT fir_cachesize = (fir_len + dsbfirstep - 2) / dsbfirstep;
++    UINT divisor = gcd_rate(dsb->freqAdjustNum, dsb->freqAdjustDen);
++    UINT residue = freqAcc_start % divisor;
++    UINT period = dsb->freqAdjustDen / divisor;
++    UINT phase = ((freqAcc_start - residue) / divisor) % period;
++    UINT phase_delta = dsb->freqAdjustNum / divisor;
++    float *phase_table = get_phase_cache(dsb, fir_cachesize + 1, divisor, residue);
+     UINT required_input = max_ipos + fir_cachesize;
+     float *intermediate, *fir_copy, *itmp;
+ 
+@@ -378,9 +437,19 @@
+         float rem = int_fir_steps + 1.0 - total_fir_steps;
+ 
+         int fir_used = 0;
+-        while (idx < fir_len - 1) {
+-            fir_copy[fir_used++] = fir[idx] * (1.0 - rem) + fir[idx + 1] * rem;
+-            idx += dsb->firstep;
++        if (phase_table)
++        {
++            fir_copy = phase_table + phase * (fir_cachesize + 1);
++            fir_used = *fir_copy++;
++            phase = (phase + phase_delta) % period;
++        }
++        else
++        {
++            fir_copy = dsb->device->cp_buffer;
++            while (idx < fir_len - 1) {
++                fir_copy[fir_used++] = fir[idx] * (1.0 - rem) + fir[idx + 1] * rem;
++                idx += dsb->firstep;
++            }
+         }
+ 
+         assert(fir_used <= fir_cachesize);
+@@ -390,9 +459,15 @@
+             int j;
+             float sum = 0.0;
+             float* cache = &intermediate[channel * required_input + ipos];
+-            for (j = 0; j < fir_used; j++)
++            __m128 accum = _mm_setzero_ps();
++            float lanes[4];
++            for (j = 0; j + 4 <= fir_used; j += 4)
++                accum = _mm_add_ps(accum, _mm_mul_ps(_mm_loadu_ps(fir_copy + j), _mm_loadu_ps(cache + j)));
++            _mm_storeu_ps(lanes, accum);
++            sum = ((lanes[0] + lanes[1]) + lanes[2]) + lanes[3];
++            for (; j < fir_used; j++)
+                 sum += fir_copy[j] * cache[j];
+-            dsb->put(dsb, i * ostride, channel, sum * dsb->firgain);
++            put_current_sample(dsb, i * ostride, channel, sum * dsb->firgain);
+         }
+     }
+ 
+--- a/dlls/dsound/buffer.c
++++ b/dlls/dsound/buffer.c
+@@ -1177,6 +1177,7 @@
+     free(This->notifies);
+     free(This->pwfx);
+     free(This->committedbuff);
++    free(This->fir_phase_cache);
+ 
+     if (This->filters) {
+         int i;
+@@ -1230,6 +1231,7 @@
+     AcquireSRWLockShared(&pdsb->lock);
+ 
+     CopyMemory(dsb, pdsb, sizeof(*dsb));
++    dsb->fir_phase_cache = NULL;
+ 
+     dsb->pwfx = DSOUND_CopyFormat(pdsb->pwfx);
+ 
+--- a/dlls/dsound/dsound_private.h
++++ b/dlls/dsound/dsound_private.h
+@@ -151,6 +151,8 @@
+     float                       firgain;
+     LONG64                      freqAdjustNum,freqAdjustDen;
+     LONG64                      freqAccNum;
++    float *fir_phase_cache;
++    UINT fir_phase_num, fir_phase_den, fir_phase_step, fir_phase_residue;
+     /* used for mixing */
+     DWORD                       sec_mixpos;
+     /* Holds a copy of the next 'writelead' bytes, to be used for mixing. This makes it
+--- a/dlls/dsound/dsound_convert.c
++++ b/dlls/dsound/dsound_convert.c
+@@ -37,6 +37,7 @@
+ 
+ #include <stdarg.h>
+ #include <math.h>
++#include <xmmintrin.h>
+ 
+ #include "windef.h"
+ #include "winbase.h"
+@@ -324,6 +325,8 @@
+ void mixieee32(float *src, float *dst, unsigned samples)
+ {
+     TRACE("%p - %p %d\n", src, dst, samples);
++    for (; samples >= 4; src += 4, dst += 4, samples -= 4)
++        _mm_storeu_ps(dst, _mm_add_ps(_mm_loadu_ps(dst), _mm_loadu_ps(src)));
+     while (samples--)
+         *(dst++) += *(src++);
+ }

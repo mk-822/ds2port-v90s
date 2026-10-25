@@ -6,3 +6,5 @@
 *.json text eol=lf
 *.md text eol=lf
 *.ps1 text eol=crlf
+# Unified patches use a single space for blank context lines.
+*.patch -whitespace

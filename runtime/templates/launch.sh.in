@@ -5,7 +5,7 @@ R=@@RUNTIME@@
 C=$R/port
 . "$C/env.sh"
 if [ "${1:-}" = --check ]; then
- for f in "$P/game/"@@EXE@@ "$W/bin/wine" "$C/runtime/box64" "$C/runtime/dsfont.dll" "$R/native/bin/Xvfb" "$R/native/bin/fbbridge" "$R/native/bin/sb16-synth" "$C/assets/fonts/msgothic.ttc"; do
+ for f in "$P/game/"@@EXE@@ "$W/bin/wine" "$C/runtime/box64" "$C/runtime/dsfont.dll" "$C/runtime/dsound.dll" "$R/native/bin/Xvfb" "$R/native/bin/fbbridge" "$R/native/bin/sb16-synth" "$C/assets/fonts/msgothic.ttc"; do
   [ -f "$f" ] || { echo "Missing: $f"; exit 1; }
  done
  echo 'DS2PORT_RUNTIME_OK'
@@ -85,6 +85,11 @@ python3 "$C/prefix_storage.py" ensure "$S" || exit 1
 font_dll="$WINEPREFIX/drive_c/windows/syswow64/dsfont.dll"
 if ! cmp -s "$C/runtime/dsfont.dll" "$font_dll"; then
  cp "$C/runtime/dsfont.dll" "$font_dll.ds2port-new" && mv "$font_dll.ds2port-new" "$font_dll" || exit 1
+fi
+# One DirectSound module in the common prefix serves every updated title.
+audio_dll="$WINEPREFIX/drive_c/windows/syswow64/dsound.dll"
+if ! cmp -s "$C/runtime/dsound.dll" "$audio_dll"; then
+ cp "$C/runtime/dsound.dll" "$audio_dll.ds2port-new" && mv "$audio_dll.ds2port-new" "$audio_dll" || exit 1
 fi
 backend=$(cat "$C/midi-backend" 2>/dev/null || echo opl3)
 if [ "$backend" = soundfont ]; then
