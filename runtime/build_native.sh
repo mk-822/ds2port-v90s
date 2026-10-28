@@ -19,6 +19,10 @@ gcc -O2 -Iruntime/native tests/input-mode.c -o "$build/input-mode-test"
 gcc -O2 runtime/native/xctl.c -o "$native/bin/xctl" -lX11 -ldl
 gcc -O2 runtime/native/midisynth.c -o "$native/bin/midisynth" -ldl
 gcc -shared -fPIC -DPIC -O2 runtime/native/pcm_jump3_volume.c -o "$native/lib/libasound_module_pcm_jump3_volume.so" -lasound
+gcc -shared -fPIC -DPIC -O3 runtime/native/pcm_ds2port_mix.c -o "$native/lib/libasound_module_pcm_ds2port_mix.so" -lasound
+gcc -O3 runtime/native/audio-mixer.c -o "$native/bin/audio-mixer" -lasound -lpthread
+gcc -O2 tests/audio-mixer-client.c -o "$build/audio-mixer-client" -lasound -lpthread
+DS2PORT_MIXER_TEST_BIN="$native/bin/audio-mixer" DS2PORT_MIXER_TEST_PLUGIN="$native/lib/libasound_module_pcm_ds2port_mix.so" DS2PORT_MIXER_TEST_CLIENT="$build/audio-mixer-client" python3 -m unittest discover -s tests -p test_audio_mixer.py
 g++ -O2 -static-libstdc++ -static-libgcc -I"$adlsrc/include" runtime/native/sb16-synth.cpp "$adllib" -o "$native/bin/sb16-synth" -lasound -lm -lpthread
 g++ -O2 -static-libstdc++ -static-libgcc -Iruntime/native -I"$adlsrc/include" tests/midi-reset-test.cpp "$adllib" -o "$build/midi-reset-test" -lasound -lm -lpthread
 "$build/midi-reset-test"
@@ -29,6 +33,7 @@ i686-w64-mingw32-gcc -Os -static tests/probes/ddraw32.c -o "$native/tests/ddraw3
 i686-w64-mingw32-gcc -Os -static tests/probes/midi32.c -o "$native/tests/midi32.exe" -lwinmm
 x86_64-linux-gnu-gcc -Os tests/probes/linux_probe.c -o "$native/tests/linux-probe"
 strip "$native/bin/fbbridge" "$native/bin/xctl" "$native/bin/midisynth" "$native/bin/sb16-synth" "$native/lib/libasound_module_pcm_jump3_volume.so"
+strip "$native/bin/audio-mixer" "$native/lib/libasound_module_pcm_ds2port_mix.so"
 cp /usr/bin/Xvfb /usr/bin/xkbcomp /usr/bin/xwininfo "$native/bin/"
 cp -L /usr/lib/aarch64-linux-gnu/libXtst.so.6 "$native/lib/"
 cp -L /usr/lib/aarch64-linux-gnu/libX*.so.* "$native/lib/"

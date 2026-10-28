@@ -5,7 +5,7 @@ R=@@RUNTIME@@
 C=$R/port
 . "$C/env.sh"
 if [ "${1:-}" = --check ]; then
- for f in "$P/game/"@@EXE@@ "$W/bin/wine" "$C/runtime/box64" "$C/runtime/dsfont.dll" "$C/runtime/dsound.dll" "$R/native/bin/Xvfb" "$R/native/bin/fbbridge" "$R/native/bin/sb16-synth" "$C/assets/fonts/msgothic.ttc"; do
+ for f in "$P/game/"@@EXE@@ "$W/bin/wine" "$C/runtime/box64" "$C/runtime/dsfont.dll" "$C/runtime/dsound.dll" "$R/native/bin/Xvfb" "$R/native/bin/fbbridge" "$R/native/bin/sb16-synth" "$R/native/bin/audio-mixer" "$R/native/lib/libasound_module_pcm_ds2port_mix.so" "$C/assets/fonts/msgothic.ttc"; do
   [ -f "$f" ] || { echo "Missing: $f"; exit 1; }
  done
  echo 'DS2PORT_RUNTIME_OK'
@@ -13,14 +13,18 @@ if [ "${1:-}" = --check ]; then
 fi
 lock=/run/plumos/ds2port-display93.lock
 mkdir "$lock" 2>/dev/null || { echo 'Another DS2Port game is running'; exit 1; }
-xpid=;spid=;bpid=;gpid=
+xpid=;spid=;bpid=;gpid=;apid=
 cleanup(){
  trap - EXIT HUP INT TERM
  timeout 5 "$R/wineserver-wrapper" -k >/dev/null 2>&1 || true
  timeout 10 "$R/wineserver-wrapper" -w >/dev/null 2>&1 || true
- for pid in "$gpid" "$bpid" "$spid" "$xpid"; do
+ for pid in "$gpid" "$bpid" "$spid" "$xpid" "$apid"; do
   [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
  done
+ if [ -n "$apid" ]; then
+  wait "$apid" || true
+  rm -f "$R/audio.pid"
+ fi
  rm -f "$R/game.pid" "$R/bridge.pid" "$R/synth.pid" "$R/xvfb.pid"
  rm -f "$R/bridge.ready"
  [ ! -d "$S" ] || python3 "$C/prefix_storage.py" unmount "$S" || true
@@ -49,6 +53,28 @@ echo "DS2Port launch $(date -u)"
 if [ -S /tmp/.X11-unix/X93 ]; then echo 'Display 93 is already in use'; exit 1; fi
 unset LD_PRELOAD SDL_HQ_SCALER SDL_ROTATION SDL_BLITTER_DISABLED
 /mnt/plumos/bin/plumos-audio-output prepare || true
+python3 "$C/configure_audio.py" "$R" || exit 1
+if [ "$(cat "$C/audio-output-mode")" = shared-mixer ]; then
+ if [ -f "$R/audio.pid" ]; then
+  previous=$(cat "$R/audio.pid")
+  case "$previous" in ''|*[!0-9]*) ;; *)
+   [ "$(cat "/proc/$previous/comm" 2>/dev/null)" != audio-mixer ] || { echo 'Audio mixer already running'; exit 1; }
+  esac
+ fi
+ [ ! -L "$R/audio.sock" ] || { echo 'Invalid audio socket'; exit 1; }
+ if [ -e "$R/audio.sock" ]; then
+  [ -S "$R/audio.sock" ] || { echo 'Invalid audio socket'; exit 1; }
+  rm -f "$R/audio.sock"
+ fi
+ ALSA_CONFIG_PATH="$C/asound-output.conf" audio-mixer "$R/audio.sock" ds2port_output >> "$R/logs/audio-mixer.log" 2>&1 &
+ apid=$!; echo "$apid" > "$R/audio.pid"
+ for i in $(seq 1 30); do
+  [ -S "$R/audio.sock" ] && break
+  kill -0 "$apid" 2>/dev/null || { echo 'Audio mixer failed'; exit 1; }
+  sleep .1
+ done
+ [ -S "$R/audio.sock" ] || { echo 'Audio mixer did not become ready'; exit 1; }
+fi
 mkdir -p /tmp/.X11-unix
 ln -sfn "$R/native/bin" /tmp/j3b
 Xvfb :93 -screen 0 640x480x24 -xkbdir "$XKB_CONFIG_ROOT" -ac -nolisten tcp -noreset >> "$R/logs/xvfb.log" 2>&1 &

@@ -159,6 +159,7 @@ class Profiles(unittest.TestCase):
                         with tarfile.open(output) as archive:
                             self.assertEqual(archive.extractfile('port/input-mode').read(), (mode + '\n').encode())
                             self.assertEqual(archive.extractfile('port/runtime/dsound.dll').read(), font.read_bytes())
+                            self.assertIn('port/configure_audio.py', archive.getnames())
 
     def test_invalid_input_mode_does_not_create_payload(self):
         with tempfile.TemporaryDirectory() as temp:

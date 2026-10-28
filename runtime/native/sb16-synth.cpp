@@ -33,7 +33,10 @@ static void event(ADL_MIDIPlayer*d,const snd_seq_event_t*e){
  }
 }
 int main(int argc,char**argv){
- ADL_MIDIPlayer*d=adl_init(44100);if(!d){fprintf(stderr,"%s\n",adl_errorString());return 1;}
+ // Match the shared output mixer so hotplug/XRUN recovery does not pass
+ // through a second ALSA rate converter. Synthesis and playback must agree.
+ constexpr unsigned sample_rate=48000;
+ ADL_MIDIPlayer*d=adl_init(sample_rate);if(!d){fprintf(stderr,"%s\n",adl_errorString());return 1;}
  adl_switchEmulator(d,ADLMIDI_EMU_DOSBOX);adl_setNumChips(d,1);
  int bank=58;const char*const*names=adl_getBankNames();for(int i=0;i<adl_getBanksCount();i++)if(strstr(names[i],"Win9x")){bank=i;break;}
  if(adl_setBank(d,bank)<0)return 2;adl_setNumFourOpsChn(d,0);adl_setVolumeRangeModel(d,ADLMIDI_VolumeModel_9X);
@@ -45,7 +48,7 @@ int main(int argc,char**argv){
   fclose(f);printf("OPL3_SELFTEST_ENERGY=%lld\n",energy);adl_close(d);return energy>0?0:4;
  }
  snd_pcm_t*pcm=0;snd_seq_t*seq=0;int rc=snd_pcm_open(&pcm,"default",SND_PCM_STREAM_PLAYBACK,0);if(rc<0){fprintf(stderr,"PCM open: %s\n",snd_strerror(rc));return 5;}
- rc=snd_pcm_set_params(pcm,SND_PCM_FORMAT_S16_LE,SND_PCM_ACCESS_RW_INTERLEAVED,2,44100,1,40000);if(rc<0){fprintf(stderr,"PCM setup: %s\n",snd_strerror(rc));return 6;}
+ rc=snd_pcm_set_params(pcm,SND_PCM_FORMAT_S16_LE,SND_PCM_ACCESS_RW_INTERLEAVED,2,sample_rate,1,40000);if(rc<0){fprintf(stderr,"PCM setup: %s\n",snd_strerror(rc));return 6;}
  rc=snd_seq_open(&seq,"default",SND_SEQ_OPEN_INPUT,SND_SEQ_NONBLOCK);if(rc<0)return 7;
  snd_seq_set_client_name(seq,"JUMP3 SB16 OPL3");int port=snd_seq_create_simple_port(seq,"SB16 OPL3 MIDI",SND_SEQ_PORT_CAP_WRITE|SND_SEQ_PORT_CAP_SUBS_WRITE,SND_SEQ_PORT_TYPE_MIDI_GENERIC|SND_SEQ_PORT_TYPE_SYNTHESIZER|SND_SEQ_PORT_TYPE_APPLICATION);if(port<0)return 8;
  // This device's kernel silently clamps requests above 2000 to the old size.

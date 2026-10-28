@@ -111,7 +111,7 @@ def prepare_payload(source, font, profile, port_id, output, input_mode="mouse"):
         for name in ("env.sh", "launch.sh", "fonts.conf", "asound.conf", "asound-core.conf", "asound-fm.conf"):
             add_bytes(tf, "port/" + name, render_template(name + ".in", replacements), name.endswith(".sh"))
         add_bytes(tf, "port/japanese.reg", (root() / "runtime/templates/japanese.reg").read_bytes())
-        for name in ('configure_prefix.py', 'prefix_storage.py', 'common_prefix.py'):
+        for name in ('configure_prefix.py', 'prefix_storage.py', 'common_prefix.py', 'configure_audio.py'):
             add_bytes(tf, 'port/' + name, (root() / 'runtime/templates' / name).read_bytes())
         add_bytes(tf, "port/midi-backend", b"opl3\n")
         add_bytes(tf, "port/input-mode", (input_mode+'\n').encode('ascii'))
@@ -168,7 +168,7 @@ def install(connection, source, runtime, profile, font=None, port_id=None, log=p
         log("ゲームを検証し、互換修正とMSゴシックを転送用に準備しています。")
         config = prepare_payload(source, font, profile, port_id, payload, input_mode)
         config["runtime_sha256"] = runtime_hash
-        config['tool_version'] = '0.1.5'
+        config['tool_version'] = '0.1.6'
         r = "/mnt/plumos/ports-runtime/" + port_id
         stage = r + "/.incoming-" + uuid.uuid4().hex
         lock = r + "/.ds2port-install.lock"
