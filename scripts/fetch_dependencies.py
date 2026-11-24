@@ -1,12 +1,15 @@
 import hashlib
 import json
 from pathlib import Path
+import sys
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / "bld/cache"
 CACHE.mkdir(parents=True, exist_ok=True)
-for name, item in json.loads((ROOT / "runtime/dependencies.json").read_text()).items():
+dependencies = json.loads((ROOT / "runtime/dependencies.json").read_text())
+for name in sys.argv[1:] or dependencies:
+    item = dependencies[name]
     path = CACHE / item["file"]
     if not path.exists():
         print("Downloading", name, flush=True)

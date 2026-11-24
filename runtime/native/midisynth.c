@@ -9,7 +9,21 @@ int main(int argc,char**argv){
  FN(new_fluid_settings,void*,(void));FN(fluid_settings_setstr,int,(void*,const char*,const char*));FN(fluid_settings_setnum,int,(void*,const char*,double));FN(fluid_settings_setint,int,(void*,const char*,int));
  FN(new_fluid_synth,void*,(void*));FN(fluid_synth_sfload,int,(void*,const char*,int));FN(new_fluid_audio_driver,void*,(void*,void*));FN(new_fluid_midi_driver,void*,(void*,void*,void*));
  FN(delete_fluid_midi_driver,void,(void*));FN(delete_fluid_audio_driver,void,(void*));FN(delete_fluid_synth,void,(void*));FN(delete_fluid_settings,void,(void*));
- void*s=new_fluid_settings();fluid_settings_setstr(s,"audio.driver","alsa");fluid_settings_setstr(s,"audio.alsa.device","default");fluid_settings_setstr(s,"midi.driver","alsa_seq");fluid_settings_setstr(s,"midi.alsa_seq.id","JUMP3");fluid_settings_setnum(s,"synth.sample-rate",44100);fluid_settings_setnum(s,"synth.gain",0.5);fluid_settings_setint(s,"synth.reverb.active",0);fluid_settings_setint(s,"synth.chorus.active",0);fluid_settings_setint(s,"synth.polyphony",64);
+ void*s=new_fluid_settings();
+ if(!s)return 3;
+ fluid_settings_setstr(s,"audio.driver","alsa");
+ fluid_settings_setstr(s,"audio.alsa.device","default");
+ fluid_settings_setstr(s,"midi.driver","alsa_seq");
+ fluid_settings_setstr(s,"midi.alsa_seq.id","JUMP3");
+ // Queue about 150 ms in the SoundFont PCM alone. Matching the mixer rate
+ // keeps ALSA from inserting a separate sample-rate converter.
+ fluid_settings_setnum(s,"synth.sample-rate",48000);
+ fluid_settings_setint(s,"audio.period-size",512);
+ fluid_settings_setint(s,"audio.periods",14);
+ fluid_settings_setnum(s,"synth.gain",0.5);
+ fluid_settings_setint(s,"synth.reverb.active",0);
+ fluid_settings_setint(s,"synth.chorus.active",0);
+ fluid_settings_setint(s,"synth.polyphony",64);
  void*synth=new_fluid_synth(s);if(!synth||fluid_synth_sfload(synth,argv[1],1)<0)return 3;
  void*audio=new_fluid_audio_driver(s,synth);if(!audio)return 4;
  void*midi=new_fluid_midi_driver(s,dlsym(lib,"fluid_synth_handle_midi_event"),synth);if(!midi)return 5;

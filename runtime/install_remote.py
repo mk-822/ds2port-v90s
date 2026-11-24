@@ -14,6 +14,124 @@ import time
 import uuid
 from contextlib import contextmanager
 
+PORTS = Path('/mnt/plumos/roms/ports')
+RUNTIMES = Path('/mnt/plumos/ports-runtime')
+DISPLAY_SOCKET = Path('/tmp/.X11-unix/X93')
+DISPLAY_LOCK = Path('/run/plumos/ds2port-display93.lock')
+MOUNTINFO = Path('/proc/self/mountinfo')
+PORT_ID = re.compile(r'[a-z][a-z0-9-]{0,39}')
+
+
+def validate_launcher(name):
+    if not isinstance(name, str) or not name.endswith('.sh'):
+        raise ValueError('Ports の表示名が無効です。')
+    title = name[:-3]
+    if (not title or title.startswith('.') or title != title.strip() or title.endswith('.')
+            or any(c in '<>:"/\\|?*' or ord(c) < 32 or ord(c) == 127 for c in title)
+            or len(name.encode('utf-8')) > 255):
+        raise ValueError('Ports の表示名が無効です。前後の空白、前後のピリオド、ファイル名に使えない文字を避けてください。')
+
+
+def launcher_owner(path):
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 256:
+        return None
+    script = path.read_bytes()
+    match = re.fullmatch(
+        rb'#!/bin/sh\nexec /mnt/plumos/(?:ports-runtime/([a-z][a-z0-9-]{0,39})/port|roms/ports/([a-z][a-z0-9-]{0,39}))/launch\.sh "\$@"\n',
+        script.replace(b'\r\n', b'\n'))
+    return (match[1] or match[2]).decode('ascii') if match else None
+
+
+def port_launchers():
+    return [path for path in PORTS.iterdir() if path.suffix.casefold() == '.sh']
+
+
+def installation_record(port, runtime):
+    if port.is_symlink() or runtime.is_symlink() or not runtime.is_dir():
+        return None
+    for path in (runtime / 'installed.json', port / 'ds2port-installed.json'):
+        if not path.is_symlink() and path.is_file():
+            return path
+    return None
+
+
+def installed_ports():
+    launchers = {}
+    for path in port_launchers():
+        owner = launcher_owner(path)
+        if owner:
+            launchers.setdefault(owner, []).append(path.name)
+    result = []
+    for runtime in sorted(RUNTIMES.iterdir()) if RUNTIMES.is_dir() else ():
+        if not PORT_ID.fullmatch(runtime.name):
+            continue
+        marker = installation_record(PORTS / runtime.name, runtime)
+        if marker is None:
+            continue
+        record = json.loads(marker.read_text(encoding='utf-8'))
+        names = sorted(launchers.get(runtime.name, []))
+        name = record.get('launcher')
+        if name not in names:
+            name = names[0] if names else None
+        result.append({'port_id': runtime.name, 'launcher': name})
+    return result
+
+
+def existing_launchers(ident, launcher):
+    target = PORTS / launcher
+    if (target.exists() or target.is_symlink()) and launcher_owner(target) != ident:
+        raise ValueError('Ports に同じ名前の項目があります: ' + launcher)
+    owned = []
+    for path in port_launchers():
+        owner = launcher_owner(path)
+        if owner == ident:
+            owned.append(path)
+        elif path.name.casefold() == launcher.casefold():
+            raise ValueError('Ports に同じ名前の項目があります: ' + path.name)
+    return owned
+
+
+def uninstall(ident):
+    if not PORT_ID.fullmatch(ident):
+        raise ValueError('Invalid port ID')
+    port, runtime = PORTS / ident, RUNTIMES / ident
+    marker = runtime / 'installed.json'
+    with shared_environment_lock():
+        if DISPLAY_SOCKET.exists():
+            raise ValueError('先に起動中のゲームを終了してください。')
+        record = installation_record(port, runtime)
+        if RUNTIMES.is_symlink() or marker.is_symlink() or record is None:
+            raise ValueError('DS2Port のインストール記録が見つかりません: ' + ident)
+        with shared_environment_lock(runtime / '.ds2port-install.lock'):
+            # A legacy per-title prefix can still have an OverlayFS mount.
+            storage = runtime / 'port/prefix_storage.py'
+            if storage.is_file() and (runtime / 'prefix-storage.json').is_file():
+                subprocess.run([sys.executable, str(storage), 'unmount', str(runtime)], check=True)
+            roots = (port.resolve(), runtime.resolve())
+            for line in MOUNTINFO.read_text().splitlines():
+                mount = Path(re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), line.split()[4]))
+                if any(mount.is_relative_to(root) for root in roots):
+                    raise ValueError('アンマウントされていない配置先があります: ' + str(mount))
+            if record != marker:
+                temporary = runtime / ('.uninstall-' + uuid.uuid4().hex)
+                shutil.copyfile(record, temporary)
+                temporary.replace(marker)
+            for path in port_launchers():
+                if launcher_owner(path) == ident:
+                    path.unlink()
+            if port.exists():
+                shutil.rmtree(port)
+            # Keep the record until all recursive deletes succeed so a retry can finish.
+            for path in runtime.iterdir():
+                if path.name in ('installed.json', '.ds2port-install.lock'):
+                    continue
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            marker.unlink()
+        runtime.rmdir()
+
 
 def sha(path):
     h = hashlib.sha256()
@@ -270,9 +388,10 @@ def prepare_cache(description, runtimes=Path('/mnt/plumos/ports-runtime'), ports
 
 
 @contextmanager
-def shared_environment_lock(path=Path('/run/plumos/ds2port-display93.lock')):
+def shared_environment_lock(path=None):
     # Share the launcher's lock so no title can start while the common registry
     # is being changed. A failed acquisition must never remove someone else's lock.
+    path = DISPLAY_LOCK if path is None else path
     try:
         path.mkdir()
     except FileExistsError:
@@ -290,12 +409,12 @@ def main(config_path):
 
 def install_files(config_path):
     config_path = Path(config_path).resolve()
-    config = json.loads(config_path.read_text())
+    config = json.loads(config_path.read_text(encoding='utf-8'))
     ident = config["port_id"]
-    if not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", ident):
+    if not PORT_ID.fullmatch(ident):
         raise ValueError("Invalid port ID")
-    p = Path("/mnt/plumos/roms/ports") / ident
-    r = Path("/mnt/plumos/ports-runtime") / ident
+    p = PORTS / ident
+    r = RUNTIMES / ident
     common = r.parent / '.shared/wine10'
     stage = config_path.parent
     if stage.parent != r or not stage.name.startswith(".incoming-"):
@@ -304,9 +423,12 @@ def install_files(config_path):
         raise ValueError("This runtime requires aarch64")
     if p.is_symlink() or r.is_symlink() or common.is_symlink() or (common / 'prefix').is_symlink():
         raise ValueError("Port root must not be a symbolic link")
-    if Path("/tmp/.X11-unix/X93").exists():
+    if DISPLAY_SOCKET.exists():
         raise ValueError("先に起動中のゲームを終了してください。")
-    for root in (Path("/mnt/plumos/roms/ports"), r):
+    launcher = config['launcher']
+    validate_launcher(launcher)
+    old_launchers = existing_launchers(ident, launcher)
+    for root in (PORTS, r):
         if os.statvfs(root).f_flag & os.ST_RDONLY:
             raise ValueError("転送先が読み取り専用です。SDの状態を確認してください。")
     for name in (("payload",) if config.get('runtime_cache') else ("runtime", "payload")):
@@ -346,9 +468,6 @@ def install_files(config_path):
         cache = prepare_cache(description, verified=runtime)
         if cache is None:
             raise ValueError('Unable to publish verified runtime cache')
-    launcher = config["launcher"]
-    if "/" in launcher or "\\" in launcher or not launcher.endswith(".sh"):
-        raise ValueError("Invalid launcher name")
     if sha(payload / "game" / config["executable"]) != config["game_sha256"]:
         raise ValueError("Game executable mismatch")
     backup = r / "backups" / (time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + "-" + stage.name[-8:])
@@ -417,17 +536,21 @@ def install_files(config_path):
                 if source.is_file():
                     install_file(source, r / 'port' / source.relative_to(subtree), subtree == runtime / 'shared')
         preserve = {x.casefold() for x in config["preserve"]}
+        replace_if_sha256 = config.get("replace_if_sha256", {})
         for source in sorted((payload / "game").rglob("*")):
             relative = source.relative_to(payload / "game")
-            if relative.parts[0].casefold() in preserve & existing_roots:
-                continue
             if source.is_file():
-                install_file(source, p / "game" / relative)
+                dest = p / "game" / relative
+                name = relative.parts[0].casefold()
+                if name in preserve & existing_roots:
+                    expected = replace_if_sha256.get(name) if len(relative.parts) == 1 else None
+                    if not expected or dest.is_symlink() or not dest.is_file() or sha(dest) != expected:
+                        continue
+                install_file(source, dest)
         install_file(payload / "wineserver-wrapper", r / "wineserver-wrapper")
         cache_reference = stage / 'shared-runtime.json'
         cache_reference.write_text(json.dumps({'schema': 1, 'path': str(cache)}))
         install_file(cache_reference, r / 'shared-runtime.json')
-        install_file(payload / "launcher.sh", p.parent / launcher)
         # Existing Japanese Noto replacements must be cleared with Wine stopped.
         user_reg = (common if (common / 'prefix/user.reg').is_file() else r) / "prefix/user.reg"
         if user_reg.exists():
@@ -445,7 +568,22 @@ def install_files(config_path):
         result = subprocess.run([str(r / "port/runtime/box64"), str(r / "native/tests/linux-probe")], env=env, text=True, capture_output=True)
         if result.returncode or "BOX64_LINUX_OK" not in result.stdout:
             raise RuntimeError("Box64動作検査に失敗しました: " + result.stdout + result.stderr)
-        (r / "installed.json").write_text(json.dumps({"version": config.get('tool_version', '0.1.2'), "profile": config["profile"], "backup": str(backup), 'runtime_sha256': config['runtime_sha256'], 'game_sha256': config['game_sha256']}, indent=2))
+        for path in old_launchers:
+            if path.name != launcher:
+                old = backup / 'files' / str(len(changes))
+                old.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, old)
+                changes.append(('file', path, old))
+                path.unlink()
+        install_file(payload / 'launcher.sh', PORTS / launcher)
+        record = stage / 'installed.json'
+        record.write_text(json.dumps({
+            'version': config.get('tool_version', '0.1.2'), 'profile': config['profile'],
+            'backup': str(backup), 'runtime_sha256': config['runtime_sha256'],
+            'game_sha256': config['game_sha256'], 'launcher': launcher,
+            'midi_backend': config.get('midi_backend', 'opl3'), 'display_mode': config.get('display_mode', 'auto'),
+        }, indent=2))
+        install_file(record, r / 'installed.json')
         print(result.stdout.strip(), flush=True)
         print("DS2PORT_INSTALL_OK backup=" + str(backup), flush=True)
     except BaseException as failure:
@@ -471,7 +609,14 @@ def install_files(config_path):
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == '--cache':
+    if sys.argv[1] == '--list':
+        print(json.dumps(installed_ports()))
+    elif sys.argv[1] == '--uninstall':
+        uninstall(sys.argv[2])
+    elif sys.argv[1] == '--check-launcher':
+        validate_launcher(sys.argv[3])
+        existing_launchers(sys.argv[2], sys.argv[3])
+    elif sys.argv[1] == '--cache':
         # Planning checks layout/size/modes; main() hashes all files before use.
         cache = prepare_cache(json.loads(Path(sys.argv[2]).read_text()), verify_existing=False)
         print('DS2PORT_CACHE_RESULT ' + json.dumps({'ready': cache is not None, 'path': str(cache) if cache else None}), flush=True)

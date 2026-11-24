@@ -1,0 +1,13 @@
+{
+  "id": "cj16",
+  "title": "Creature Jungle 16",
+  "launcher": "CJ16",
+  "executable": "CJ16.exe",
+  "original_sha256": "08415910fc9474f98924af1e324d53fc633a449fa4b8f2ee7d7b5de7a7992934",
+  "patch": "cj16-borderless",
+  "patched_sha256": "da5f7b51f37ba0e92883e37ba0c6b0cca6bf85ea8d0bdf578622c4fff8f91f2a",
+  "windowed_sha256": "3fc5aae7a0027c1fe10c1c4358e4a132536999bfbcea1e6d46f88177a23b81a9",
+  "box64_safe_flags": true,
+  "cnc_ddraw": true,
+  "status": "16ビットの半透明描画と仮想フルスクリーンを適用"
+}

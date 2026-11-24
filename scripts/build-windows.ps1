@@ -9,15 +9,23 @@ if (-not $SkipDependencies) {
 }
 & (Join-Path $PSScriptRoot 'build-font-shim.ps1')
 & (Join-Path $PSScriptRoot 'build-audio-shim.ps1')
+& $python scripts/prepare_ddraw.py
+if ($LASTEXITCODE -ne 0) { throw 'DirectDraw wrapper preparation failed' }
+& $python scripts/fetch_dependencies.py generaluser-gs generaluser-gs-license
+if ($LASTEXITCODE -ne 0) { throw 'GeneralUser GS preparation failed' }
 $repoRoot = (Get-Location).Path
 $profilesData = (Join-Path $repoRoot 'profiles') + ';profiles'
 $templatesData = (Join-Path $repoRoot 'runtime/templates') + ';runtime/templates'
 $installerData = (Join-Path $repoRoot 'runtime/install_remote.py') + ';runtime'
 $fontData = (Join-Path $repoRoot 'bld/win32/dsfont.dll') + ';runtime/win32'
 $audioData = (Join-Path $repoRoot 'bld/win32/dsound.dll') + ';runtime/win32'
-& $python -m PyInstaller --noconfirm --clean --onefile --windowed --name DS2PortV90S --distpath bld/dist/DS2PortV90S --workpath bld/pyinstaller --specpath bld --paths src --add-data $profilesData --add-data $templatesData --add-data $installerData --add-data $fontData --add-data $audioData scripts/app_main.py
+$ddrawData = (Join-Path $repoRoot 'bld/win32/ddraw.dll') + ';runtime/win32'
+$ddrawLicense = (Join-Path $repoRoot 'runtime/licenses/cnc-ddraw.txt') + ';runtime/licenses'
+$soundfontData = (Join-Path $repoRoot 'bld/cache/GeneralUser-GS.sf2') + ';runtime/assets'
+$soundfontLicense = (Join-Path $repoRoot 'bld/cache/GeneralUser-GS-LICENSE.txt') + ';runtime/assets'
+& $python -m PyInstaller --noconfirm --clean --onefile --windowed --name DS2PortV90S --distpath bld/dist/DS2PortV90S --workpath bld/pyinstaller --specpath bld --paths src --add-data $profilesData --add-data $templatesData --add-data $installerData --add-data $fontData --add-data $audioData --add-data $ddrawData --add-data $ddrawLicense --add-data $soundfontData --add-data $soundfontLicense scripts/app_main.py
 if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
-& $python -m PyInstaller --noconfirm --clean --onefile --console --name DS2PortCLI --distpath bld/dist/DS2PortV90S --workpath bld/pyinstaller-cli --specpath bld --paths src --add-data $profilesData --add-data $templatesData --add-data $installerData --add-data $fontData --add-data $audioData scripts/app_main.py
+& $python -m PyInstaller --noconfirm --clean --onefile --console --name DS2PortCLI --distpath bld/dist/DS2PortV90S --workpath bld/pyinstaller-cli --specpath bld --paths src --add-data $profilesData --add-data $templatesData --add-data $installerData --add-data $fontData --add-data $audioData --add-data $ddrawData --add-data $ddrawLicense --add-data $soundfontData --add-data $soundfontLicense scripts/app_main.py
 if ($LASTEXITCODE -ne 0) { throw 'CLI build failed' }
 if ($ExecutablesOnly) { Write-Output 'Windows executables built'; return }
 $destination = 'bld/dist/DS2PortV90S'

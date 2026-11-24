@@ -8,8 +8,11 @@ import shlex
 import tarfile
 import tempfile
 import uuid
-from .profiles import digest, game_executable, patch_executable
+from . import __version__
+from .profiles import digest, display_profile, game_executable, patch_executable, patch_x68sound
 from .resources import root
+
+MIDI_BACKENDS = ('opl3', 'timgm6mb', 'generaluser-gs')
 
 
 def file_hash(path):
@@ -44,6 +47,20 @@ def audio_shim():
     raise ValueError('dsound.dllがありません。scripts/build-audio-shim.ps1で音声DLLを作成してください。')
 
 
+def cnc_ddraw():
+    for path in (root() / 'runtime/win32/ddraw.dll', root() / 'bld/win32/ddraw.dll'):
+        if path.is_file():
+            return path
+    raise ValueError('描画互換用のddraw.dllがありません。scripts/prepare_ddraw.pyを実行してください。')
+
+
+def generaluser_gs_asset(name):
+    for path in (root() / 'runtime/assets' / name, root() / 'bld/cache' / name):
+        if path.is_file():
+            return path
+    raise ValueError('GeneralUser GSが見つかりません。音源を同梱したWindows版を使用してください。')
+
+
 def validate_bundle(path):
     path = Path(path)
     checksum = path.with_name(path.name + ".sha256")
@@ -68,19 +85,34 @@ def render_template(name, replacements):
     return text.encode("utf-8")
 
 
-def prepare_payload(source, font, profile, port_id, output, input_mode="mouse"):
+def prepare_payload(source, font, profile, port_id, output, input_mode="mouse", ports_name=None,
+                    *, midi_backend="opl3", display_mode="auto"):
     """Read user files without changing the source, including the original EXE."""
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", port_id):
         raise ValueError("Invalid port ID")
     if input_mode not in ('mouse','joypad','keyboard'):
         raise ValueError('起動時モードはmouse、joypad、keyboardを指定してください。')
+    if midi_backend not in MIDI_BACKENDS:
+        raise ValueError('MIDI音源は' + '、'.join(MIDI_BACKENDS) + 'から指定してください。')
+    profile = display_profile(profile, display_mode)
     source = Path(source).resolve()
     executable = game_executable(source, profile)
     original = executable.read_bytes()
     patched = patch_executable(original, profile)
     font = windows_font(font)
     p, r = "/mnt/plumos/roms/ports/" + port_id, "/mnt/plumos/ports-runtime/" + port_id
-    replacements = {"PORT": p, "RUNTIME": r, "EXE": shlex.quote(profile["executable"])}
+    game_env = []
+    if profile.get("box64_safe_flags"):
+        game_env.append("export BOX64_DYNAREC_SAFEFLAGS=2")
+    if profile.get("cnc_ddraw"):
+        game_env.append('export WINEDLLOVERRIDES="$WINEDLLOVERRIDES;ddraw=n,b"')
+    elif profile.get("builtin_ddraw"):
+        game_env.append('export WINEDLLOVERRIDES="$WINEDLLOVERRIDES;ddraw=b"')
+    replacements = {
+        "PORT": p, "RUNTIME": r, "EXE": shlex.quote(profile["executable"]),
+        "GAME_ENV": "\n".join(game_env),
+        "TRACK_VIEWPORT": "no" if profile.get("patch") == "cj16-borderless" else "yes",
+    }
     backup_name = executable.stem + '.original.exe'
 
     def add_bytes(tf, name, content, executable=False):
@@ -89,6 +121,9 @@ def prepare_payload(source, font, profile, port_id, output, input_mode="mouse"):
         tf.addfile(item, io.BytesIO(content))
 
     total = 0
+    soundfont_bytes = 0
+    replace_if_sha256 = {}
+    preserve = profile.get("preserve", [item.name for item in source.iterdir() if item != executable])
     with tarfile.open(output, "w:gz") as tf:
         for path in sorted(source.rglob("*")):
             if path.is_symlink():
@@ -97,12 +132,33 @@ def prepare_payload(source, font, profile, port_id, output, input_mode="mouse"):
                 name = "game/" + path.relative_to(source).as_posix()
                 if name.casefold() == ('game/' + backup_name).casefold():
                     continue
+                if profile.get('x68sound_pcm_lock') and path.parent == source and path.name.casefold() == 'x68sound.dll':
+                    data = path.read_bytes()
+                    updated = patch_x68sound(data)
+                    if updated != data:
+                        add_bytes(tf, name, updated)
+                        replace_if_sha256[path.name.casefold()] = digest(data)
+                        total += len(updated)
+                        continue
                 # Normalize modes; an NTFS readonly source must remain writable on SD.
                 def mode(item):
                     item.mode, item.uid, item.gid = 0o644, 0, 0
                     return item
                 tf.add(path, arcname=name, recursive=False, filter=mode)
                 total += path.stat().st_size
+        if profile.get("cnc_ddraw"):
+            entries = {item.name.casefold() for item in source.iterdir()}
+            # Keep a user-supplied DirectDraw wrapper and its configuration.
+            if "ddraw.dll" not in entries:
+                dll = cnc_ddraw().read_bytes()
+                add_bytes(tf, "game/ddraw.dll", dll)
+                add_bytes(tf, "port/licenses/cnc-ddraw.txt", (root() / "runtime/licenses/cnc-ddraw.txt").read_bytes())
+                total += len(dll)
+                if "ddraw.ini" not in entries:
+                    settings = b"[ddraw]\nrenderer=gdi\nwindowed=true\nborder=false\nmaintas=true\nsinglecpu=false\nmaxfps=60\n"
+                    add_bytes(tf, "game/ddraw.ini", settings)
+                    total += len(settings)
+            preserve = [*preserve, "ddraw.dll", "ddraw.ini"]
         add_bytes(tf, "game/" + profile["executable"], patched)
         add_bytes(tf, "game/" + backup_name, original)
         add_bytes(tf, "port/assets/fonts/msgothic.ttc", font.read_bytes())
@@ -111,15 +167,26 @@ def prepare_payload(source, font, profile, port_id, output, input_mode="mouse"):
         for name in ("env.sh", "launch.sh", "fonts.conf", "asound.conf", "asound-core.conf", "asound-fm.conf"):
             add_bytes(tf, "port/" + name, render_template(name + ".in", replacements), name.endswith(".sh"))
         add_bytes(tf, "port/japanese.reg", (root() / "runtime/templates/japanese.reg").read_bytes())
-        for name in ('configure_prefix.py', 'prefix_storage.py', 'common_prefix.py', 'configure_audio.py'):
+        for name in ('configure_prefix.py', 'prefix_storage.py', 'common_prefix.py', 'configure_audio.py', 'configure_midi.py'):
             add_bytes(tf, 'port/' + name, (root() / 'runtime/templates' / name).read_bytes())
-        add_bytes(tf, "port/midi-backend", b"opl3\n")
+        if midi_backend == 'generaluser-gs':
+            soundfont = generaluser_gs_asset('GeneralUser-GS.sf2')
+            with soundfont.open('rb') as stream:
+                info = tarfile.TarInfo('port/assets/GeneralUser-GS.sf2')
+                info.size = soundfont_bytes = soundfont.stat().st_size
+                tf.addfile(info, stream)
+            license_text = generaluser_gs_asset('GeneralUser-GS-LICENSE.txt').read_bytes()
+            add_bytes(tf, 'port/licenses/GeneralUser-GS-LICENSE.txt', license_text)
+        add_bytes(tf, "port/midi-backend", (midi_backend + '\n').encode('ascii'))
         add_bytes(tf, "port/input-mode", (input_mode+'\n').encode('ascii'))
         add_bytes(tf, "wineserver-wrapper", render_template("wineserver-wrapper.in", replacements), True)
         add_bytes(tf, "launcher.sh", render_template("port-launcher.sh.in", replacements), True)
+    default_name = profile['launcher'] if port_id == profile['id'] else f"{profile['launcher']} ({port_id})"
     return {"port_id": port_id, "profile": profile["id"], "input_mode": input_mode, "executable": profile["executable"],
-            "launcher": (profile["launcher"] if port_id == profile["id"] else profile["launcher"] + " (" + port_id + ")") + ".sh",
-            "game_sha256": digest(patched), "preserve": profile.get("preserve", [item.name for item in source.iterdir() if item != executable]),
+            "midi_backend": midi_backend, "display_mode": display_mode, "soundfont_bytes": soundfont_bytes,
+            "launcher": (ports_name or default_name) + '.sh',
+            "game_sha256": digest(patched), "preserve": preserve,
+            "replace_if_sha256": replace_if_sha256,
             "payload_sha256": file_hash(output), "game_bytes": total + len(patched) + len(original)}
 
 
@@ -148,11 +215,12 @@ def required_ext4_bytes(unpacked, archive_bytes, game_bytes, existing_prefix_byt
     return runtime_growth+game_bytes*3+prefix_growth+seed_growth+160*1024**2
 
 
-def install(connection, source, runtime, profile, font=None, port_id=None, log=print, progress=lambda value: None, input_mode="mouse"):
+def install(connection, source, runtime, profile, font=None, port_id=None, log=print, progress=lambda value: None,
+            input_mode="mouse", ports_name=None, *, midi_backend="opl3", display_mode="auto"):
     port_id = port_id or profile["id"]
     runtime_hash, metadata = validate_bundle(runtime)
     # Reject unsupported games before making any changes on the device.
-    patch_executable(game_executable(Path(source), profile).read_bytes(), profile)
+    patch_executable(game_executable(Path(source), profile).read_bytes(), display_profile(profile, display_mode))
     windows_font(font)
     status = inspect_device(connection)
     if status["arch"] != "aarch64" or status["uid"] != 0 or not status["plumos"]:
@@ -166,9 +234,10 @@ def install(connection, source, runtime, profile, font=None, port_id=None, log=p
     with tempfile.TemporaryDirectory(prefix="ds2port-") as tmp:
         payload = Path(tmp) / "payload.tar.gz"
         log("ゲームを検証し、互換修正とMSゴシックを転送用に準備しています。")
-        config = prepare_payload(source, font, profile, port_id, payload, input_mode)
+        config = prepare_payload(source, font, profile, port_id, payload, input_mode, ports_name,
+                                 midi_backend=midi_backend, display_mode=display_mode)
         config["runtime_sha256"] = runtime_hash
-        config['tool_version'] = '0.1.6'
+        config['tool_version'] = __version__
         r = "/mnt/plumos/ports-runtime/" + port_id
         stage = r + "/.incoming-" + uuid.uuid4().hex
         lock = r + "/.ds2port-install.lock"
@@ -177,6 +246,8 @@ def install(connection, source, runtime, profile, font=None, port_id=None, log=p
         try:
             connection.run("mkdir " + q(stage))
             connection.upload_bytes((root() / "runtime/install_remote.py").read_bytes(), stage + "/install.py")
+            connection.run('python3 ' + q(stage + '/install.py') + ' --check-launcher '
+                           + q(port_id) + ' ' + q(config['launcher']))
             with tarfile.open(runtime) as archive:
                 entries = [[m.name, 'file' if m.isfile() else 'directory' if m.isdir() else 'symlink' if m.issym() else 'hardlink', m.mode & 0o777, m.linkname, m.size] for m in archive.getmembers()]
             description = {'runtime_sha256': runtime_hash, 'bundle': metadata, 'entries': entries}
@@ -187,7 +258,7 @@ def install(connection, source, runtime, profile, font=None, port_id=None, log=p
             status = inspect_device(connection)
             legacy_ready=bool(status.get('prefix_ready')) and not status.get('shared_environment_exists',False)
             shared_ready=status.get('shared_prefix_ready',False)
-            needed=required_ext4_bytes(unpacked,Path(runtime).stat().st_size,game_size,
+            needed=required_ext4_bytes(unpacked,Path(runtime).stat().st_size,game_size + config['soundfont_bytes'],
                                       status.get('shared_prefix_bytes',0),cached['ready'],
                                       shared_ready or legacy_ready,status.get('shared_prefix_seed_bytes',0) if legacy_ready and not shared_ready else 0)
             if status['roots']['/mnt/plumos']['free'] < needed:
@@ -217,6 +288,16 @@ def install(connection, source, runtime, profile, font=None, port_id=None, log=p
                 connection.run("python3 -c " + q(cleanup))
             except Exception as error:
                 log("一時ファイルの後片付けが必要です: " + str(error))
+
+
+def list_installed(connection):
+    script = (root() / 'runtime/install_remote.py').read_text(encoding='utf-8')
+    return json.loads(connection.run('python3 -c ' + shlex.quote(script) + ' --list'))
+
+
+def uninstall(connection, port_id):
+    script = (root() / 'runtime/install_remote.py').read_text(encoding='utf-8')
+    connection.run('python3 -c ' + shlex.quote(script) + ' --uninstall ' + shlex.quote(port_id), timeout=1200)
 
 
 def launch(connection, config):

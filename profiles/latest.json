@@ -1,0 +1,12 @@
+{
+  "id": "latest",
+  "title": "超連射68k 1.01",
+  "launcher": "LATEST",
+  "executable": "LATEST.exe",
+  "original_sha256": "1f73fb7f8a6876869245364f2bd8440a6c7fa8af1bd70fa866fa8679e72e079d",
+  "patch": "latest-timer",
+  "patched_sha256": "d247397a5b9c8c8316152f423e0ba379b17dc1d92e99ab0cae978f918730de31",
+  "x68sound_pcm_lock": true,
+  "cnc_ddraw": true,
+  "status": "DirectDraw描画・フレーム同期・X68Sound.dllのPCM互換修正を適用"
+}

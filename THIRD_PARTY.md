@@ -7,6 +7,8 @@ This repository contains the transfer tool and its own compatibility patches. Ga
 | Box64 | 0.4.5, fbba162, [source](https://github.com/ptitSeb/box64/tree/fbba162), [Debian build packaging](https://github.com/Pi-Apps-Coders/box64-debs) | MIT |
 | Wine | 10.0 amd64 WoW64, [build](https://github.com/Kron4ek/Wine-Builds/releases/tag/10.0), [source](https://gitlab.winehq.org/wine/wine/-/tree/wine-10.0), [build scripts](https://github.com/Kron4ek/Wine-Builds) | LGPL-2.1-or-later and individual files |
 | Modified Wine DirectSound | Wine 10.0 + [local patch](runtime/patches/wine10-dsound-optimized.patch), [source/build information](docs/AUDIO_OPTIMIZATION.md); exact source archive supplied with the release | LGPL-2.1-or-later |
+| cnc-ddraw | [7.1.0.0](https://github.com/FunkyFr3sh/cnc-ddraw/releases/tag/v7.1.0.0), used for Cho Ren Sha 68k 1.01 and CJ16 | [MIT](runtime/licenses/cnc-ddraw.txt) |
+| GeneralUser GS SoundFont | 2.0.3, [S. Christian Collins](https://www.schristiancollins.com/generaluser.php) | [GeneralUser GS License v2.0](https://github.com/mrbumpy409/GeneralUser-GS/blob/684543d5e5efaef08d02be50dcda8d552478fa60/documentation/LICENSE.txt), included in the Windows distribution |
 | libADLMIDI | [1.5.1 source](https://github.com/Wohlstand/libADLMIDI/releases/tag/v1.5.1), DOSBox OPL3 emulator | LGPL-3.0-or-later; embedded components/banks have their own notices |
 | Xvfb, X11 libraries, xkb-data | Debian 12 bookworm packages | MIT/X11 and individual files |
 | ALSA lib | Debian 12 bookworm | LGPL-2.1-or-later |

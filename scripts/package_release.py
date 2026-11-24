@@ -5,6 +5,10 @@ version=tomllib.loads((root/'pyproject.toml').read_text(encoding='utf-8'))['proj
 folder=root/'bld/dist/DS2PortV90S'
 for name in ('README.md','THIRD_PARTY.md','LICENSE','NOTICE'):
     shutil.copyfile(root/name,folder/name)
+ddraw_license = folder / 'runtime/licenses/cnc-ddraw.txt'
+ddraw_license.parent.mkdir(parents=True, exist_ok=True)
+shutil.copyfile(root / 'runtime/licenses/cnc-ddraw.txt', ddraw_license)
+shutil.copyfile(root / 'bld/cache/GeneralUser-GS-LICENSE.txt', ddraw_license.with_name('GeneralUser-GS-LICENSE.txt'))
 shutil.copytree(root/'docs',folder/'docs',dirs_exist_ok=True)
 shutil.copytree(root/'bld/win32/dsound-licenses',folder/'licenses/Wine-dsound',dirs_exist_ok=True)
 for source in (root/'bld/win32/dsound.json',root/'runtime/audio-source.json',root/'runtime/patches/wine10-dsound-optimized.patch'):
@@ -27,7 +31,7 @@ for source in (Path(sys.base_prefix)/'tcl').rglob('license.terms'):
     target=folder/'licenses/tcl-tk'/(source.parent.name+'-license.txt')
     target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,target)
 (folder/'python-packages.json').write_text(json.dumps(versions,indent=2))
-for forbidden in ('msgothic.ttc','JUMP3.EXE','JUMP3.original.exe','FLOAT.EXE','FLOAT.original.exe','ac_mon.exe','ac_mon.original.exe','DF3.exe','DF3.original.exe','GEO3.EXE','GEO3.original.exe','ANGLER.EXE','ANGLER.original.exe','known_hosts','settings.json','.env'):
+for forbidden in ('msgothic.ttc','JUMP3.EXE','JUMP3.original.exe','FLOAT.EXE','FLOAT.original.exe','ac_mon.exe','ac_mon.original.exe','DF3.exe','DF3.original.exe','GEO3.EXE','GEO3.original.exe','ANGLER.EXE','ANGLER.original.exe','CJ16.exe','CJ16.original.exe','LATEST.exe','LATEST.original.exe','X68Sound.dll','known_hosts','settings.json','.env'):
     if any(p.name.casefold()==forbidden.casefold() for p in folder.rglob('*')):raise SystemExit('Private file in release')
 items={p.relative_to(folder).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in folder.rglob('*') if p.is_file() and p.name!='checksums.json'}
 (folder/'checksums.json').write_text(json.dumps(items,indent=2))

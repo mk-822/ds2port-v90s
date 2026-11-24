@@ -6,12 +6,27 @@
   },
   "box64": {
     "file": "box64.deb",
-    "url": "https://github.com/Pi-Apps-Coders/box64-debs/raw/master/debian/box64-generic-arm_0.4.5%2B20261022T110837.fbba162-1_arm64.deb",
+    "url": "https://raw.githubusercontent.com/Pi-Apps-Coders/box64-debs/61dec5d526225ac26f7b5ba8ab062208e6e20055/debian/box64-generic-arm_0.4.5%2B20261022T110837.fbba162-1_arm64.deb",
     "sha256": "70b9c9491d96229f80e06824d2d1ae2c1e49d4d3b67785bad78e849f207882ba"
   },
   "adlmidi": {
     "file": "adlmidi-source.tar.gz",
     "url": "https://github.com/Wohlstand/libADLMIDI/archive/refs/tags/v1.5.1.tar.gz",
     "sha256": "98b5a9c1c8bd8f6715c3440ff6a1913420fe96ebdd5607ff11e42ac998801c41"
+  },
+  "cnc-ddraw": {
+    "file": "cnc-ddraw.zip",
+    "url": "https://github.com/FunkyFr3sh/cnc-ddraw/releases/download/v7.1.0.0/cnc-ddraw.zip",
+    "sha256": "0b13ab89a64c9918189b1dadd449ef6ed3cb3b7b19cabd96d8adbd95505bb908"
+  },
+  "generaluser-gs": {
+    "file": "GeneralUser-GS.sf2",
+    "url": "https://raw.githubusercontent.com/mrbumpy409/GeneralUser-GS/684543d5e5efaef08d02be50dcda8d552478fa60/GeneralUser-GS.sf2",
+    "sha256": "9575028c7a1f589f5770fccc8cff2734566af40cd26ed836944e9a5152688cfe"
+  },
+  "generaluser-gs-license": {
+    "file": "GeneralUser-GS-LICENSE.txt",
+    "url": "https://raw.githubusercontent.com/mrbumpy409/GeneralUser-GS/684543d5e5efaef08d02be50dcda8d552478fa60/documentation/LICENSE.txt",
+    "sha256": "7b32efefdf95ce38a043799f0659853ddc00fbaa14d8c50f0aca16b9b8b405be"
   }
 }

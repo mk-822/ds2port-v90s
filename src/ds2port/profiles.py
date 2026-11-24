@@ -288,12 +288,95 @@ def game_executable(folder: Path, profile: dict) -> Path:
     raise ValueError(f"{profile['executable']} がありません。ゲームのフォルダーを指定してください。")
 
 
+def _patch_checked(data, changes):
+    image = bytearray(data)
+    for offset, before, after in changes:
+        if data[offset:offset + len(before)] != before:
+            raise ValueError(f'互換修正箇所が一致しません（0x{offset:x}）。')
+        image[offset:offset + len(before)] = after
+    return bytes(image)
+
+
+def _cj16_borderless(data):
+    # cnc-ddraw supplies the original 16-bit fullscreen surfaces inside a
+    # borderless X11 window. Fit the square playfield to its full height.
+    changes = [(0x7951c, b'\x6a\x00', b'\xeb\x18')]
+    # Rect(95, 15, 545, 465) and Rect(170, 90, 470, 390) in the final blit.
+    for offset, opcode, old, new in (
+        (0x73737, 0x68, 465, 480), (0x73741, 0xb9, 545, 560),
+        (0x73746, 0xba, 15, 0), (0x7374b, 0xb8, 95, 80),
+        (0x73770, 0x68, 390, 480), (0x7377d, 0xb9, 470, 560),
+        (0x73782, 0xba, 90, 0), (0x73787, 0xb8, 170, 80),
+    ):
+        changes.append((offset, struct.pack('<BI', opcode, old), struct.pack('<BI', opcode, new)))
+    return _patch_checked(data, changes)
+
+
+def _latest_timer(data):
+    # The DirectDraw sync setter must report success at startup even though
+    # the GDI wrapper cannot provide the vblank the game expects.
+    return _patch_checked(data, (
+        (0xc077, bytes.fromhex('81 e1 ff 00 00 00'), bytes.fromhex('31 c9 90 90 90 90')),
+        # Keep the 18.125 ms deadline, but prevent a late frame from being
+        # followed by a catch-up frame after only 9.0625 ms.
+        (0x4700e, bytes.fromhex('8d b0 91 00 00 00'), bytes.fromhex('8d b0 20 01 00 00')),
+    ))
+
+
+def display_profile(profile, mode):
+    if mode == 'auto':
+        return profile
+    if mode not in ('16bit', 'windowed'):
+        raise ValueError('描画モードはauto、16bit、windowedを指定してください。')
+    if not profile.get('windowed_sha256'):
+        raise ValueError('16ビットと標準ウィンドウの切り替えは対応版のCJ16で使用できます。')
+    if mode == '16bit':
+        return profile
+    return profile | {
+        'patch': 'cj16-windowed', 'patched_sha256': profile['windowed_sha256'],
+        'cnc_ddraw': False, 'builtin_ddraw': True, 'status': '標準ウィンドウ描画を適用',
+    }
+
+
 def patch_executable(data: bytes, profile: dict) -> bytes:
     if digest(data) != profile["original_sha256"]:
         raise ValueError("対応する原本EXEとSHA-256が一致しません。未変更のゲームフォルダーを指定してください。")
-    if profile['patch'] in ('discstation-common-v1', 'discstation-common-v2'):
-        result = patch_common(data)
-        if profile.get('patched_sha256') and digest(result) != profile['patched_sha256']:
-            raise ValueError('修正後EXEの検証に失敗しました。')
-        return result
-    raise ValueError("未対応の互換修正です。")
+    patch = profile['patch']
+    if patch == 'cj16-borderless':
+        data = _cj16_borderless(data)
+    elif patch == 'cj16-windowed':
+        data = _patch_checked(data, ((0x7951c, b'\x6a\x00', b'\xeb\x61'),))
+    elif patch == 'latest-timer':
+        data = _latest_timer(data)
+    elif patch not in ('discstation-common-v1', 'discstation-common-v2'):
+        raise ValueError("未対応の互換修正です。")
+    result = patch_common(data)
+    if profile.get('patched_sha256') and digest(result) != profile['patched_sha256']:
+        raise ValueError('修正後EXEの検証に失敗しました。')
+    return result
+
+
+X68SOUND_ORIGINAL = 'fc5744e4f21ee6e050418bc3dae8594953ae23eadea812675b0dd668092b0f48'
+
+
+def patch_x68sound(data: bytes) -> bytes:
+    if digest(data) != X68SOUND_ORIGINAL:
+        return data
+    # X68Sound_GetPcm writes the destination into a shared variable and
+    # clears it before returning. A concurrent call can leave the synthesis
+    # loop writing to NULL. Use that same variable to acquire ownership.
+    entry = 0x348f
+    stub = 0x13910
+    # mov edx,[esp+4]; test edx,edx; jz done; call next; pop ecx; xor eax,eax
+    code = bytes.fromhex('8b 54 24 04 85 d2 74 17 e8 00 00 00 00 59 31 c0')
+    # lock cmpxchg [ecx + (pcm_destination - next)],edx; jne done
+    code += bytes.fromhex('f0 0f b1 91') + struct.pack('<i', 0x57fb8 - (stub + 13))
+    # Jump to the original renderer. Both original return paths clear ownership.
+    code += bytes.fromhex('75 05 e9') + struct.pack('<i', 0x3498 - (stub + 31))
+    code += bytes.fromhex('31 c0 c3')  # done: xor eax,eax; ret
+    if data[entry:entry + 5] != bytes.fromhex('8b 44 24 04 a3') or any(data[stub:stub + len(code)]):
+        raise ValueError('X68Sound.dllのPCM互換修正箇所が一致しません。')
+    image = bytearray(data)
+    image[entry:entry + 5] = b'\xe9' + struct.pack('<i', stub - (entry + 5))
+    image[stub:stub + len(code)] = code
+    return bytes(image)

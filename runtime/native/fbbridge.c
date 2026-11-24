@@ -21,6 +21,65 @@
 #include "virtual_joypad.h"
 #include "input_mode.h"
 #include "mode_banner.h"
+#include "viewport.h"
+
+static ViewportRect read_viewport(const char *path)
+{
+ FILE *file=fopen(path,"r");
+ if(!file)return full_screen;
+ int left,top,right,bottom;
+ int valid=fscanf(file,"%d %d %d %d",&left,&top,&right,&bottom)==4;
+ fclose(file);
+ if(!valid||left<0||top<0||right>SCREEN_WIDTH||bottom>SCREEN_HEIGHT||right<=left||bottom<=top)
+  return full_screen;
+ return (ViewportRect){left,top,right-left,bottom-top};
+}
+
+static int image_is_rgb565(const XImage *image)
+{
+ return image->bits_per_pixel==16&&image->byte_order==LSBFirst&&
+        image->red_mask==0xf800&&image->green_mask==0x07e0&&image->blue_mask==0x001f;
+}
+
+static uint32_t rgb565_to_rgb888(uint16_t pixel)
+{
+ uint32_t red=(pixel>>11)&31,green=(pixel>>5)&63,blue=pixel&31;
+ return ((red<<3|red>>2)<<16)|((green<<2|green>>4)<<8)|(blue<<3|blue>>2);
+}
+
+static void render_viewport(XImage *image, unsigned char *fb, const struct fb_fix_screeninfo *fi,
+                            const struct fb_var_screeninfo *v, unsigned render_y, uint32_t alpha,
+                            ViewportRect source, ViewportRect fitted)
+{
+ int source_x[SCREEN_WIDTH];
+ for(int x=0;x<fitted.width;x++)
+  source_x[x]=source.x+x*source.width/fitted.width;
+ int width=v->xres<SCREEN_WIDTH?v->xres:SCREEN_WIDTH;
+ int height=v->yres<SCREEN_HEIGHT?v->yres:SCREEN_HEIGHT;
+ int native_rgb=image->bits_per_pixel==32&&v->red.offset==16&&v->green.offset==8&&v->blue.offset==0;
+ int rgb565=image_is_rgb565(image);
+ for(int y=0;y<height;y++){
+  uint32_t *out=(uint32_t*)(fb+(y+render_y)*fi->line_length+v->xoffset*4);
+  if(y<fitted.y||y>=fitted.y+fitted.height){
+   for(int x=0;x<width;x++)out[x]=alpha;
+   continue;
+  }
+  int sy=source.y+(y-fitted.y)*source.height/fitted.height;
+  const uint32_t *in=(const uint32_t*)(image->data+sy*image->bytes_per_line);
+  int left=fitted.x<width?fitted.x:width;
+  int right=fitted.x+fitted.width<width?fitted.x+fitted.width:width;
+  for(int x=0;x<left;x++)out[x]=alpha;
+  if(native_rgb){
+   for(int x=left;x<right;x++)out[x]=in[source_x[x-fitted.x]]|alpha;
+  }else for(int x=left;x<right;x++){
+   unsigned long pixel=XGetPixel(image,source_x[x-fitted.x],sy);
+   if(rgb565)pixel=rgb565_to_rgb888(pixel);
+   out[x]=alpha|((pixel>>16)&255)<<v->red.offset|((pixel>>8)&255)<<v->green.offset|(pixel&255)<<v->blue.offset;
+  }
+  for(int x=right;x<width;x++)out[x]=alpha;
+ }
+}
+
 typedef struct {Display*d;int(*send)(Display*,unsigned int,int,unsigned long);} KeyOutput;
 static void emit_key(void*context,unsigned long sym,int down){
  KeyOutput*out=context;
@@ -83,6 +142,9 @@ int main(int argc,char**argv){
   * Preserve its feel independently of the new display refresh rate. */
  double cursor_speed=setting("DS2PORT_CURSOR_SPEED",120,10,2000);
  double cursor_x=mx,cursor_y=my;
+ ViewportRect source=full_screen,fitted=full_screen;
+ const char *viewport_file=getenv("DS2PORT_VIEWPORT_FILE");
+ int64_t viewport_time=0;
  int64_t period=(int64_t)(1000000000/fps),deadline=clock_ns(),cursor_time=deadline;
  int64_t volume_time=0,report_time=deadline;
  uint64_t frames=0,changed=0,previous_hash=0;
@@ -123,6 +185,17 @@ int main(int argc,char**argv){
   usleep(33000);continue;
  }
  int64_t frame_time=clock_ns();
+ if(viewport_file&&frame_time-viewport_time>=100000000){
+  viewport_time=frame_time;
+  ViewportRect next=read_viewport(viewport_file);
+  if(next.x!=source.x||next.y!=source.y||next.width!=source.width||next.height!=source.height){
+   source=next;fitted=fit_viewport(source);
+   cursor_x=clamp_coordinate(cursor_x,fitted.x,fitted.width);
+   cursor_y=clamp_coordinate(cursor_y,fitted.y,fitted.height);
+   if(motion)motion(d,-1,map_coordinate(cursor_x,fitted.x,fitted.width,source.x,source.width),
+                        map_coordinate(cursor_y,fitted.y,fitted.height,source.y,source.height),0);
+  }
+ }
  if(frame_time-volume_time>=250000000){volume=update_volume(volume);volume_time=frame_time;}
  struct input_event ev;
  while(input>=0&&read(input,&ev,sizeof(ev))==sizeof(ev)){
@@ -168,17 +241,21 @@ int main(int argc,char**argv){
  if(mode==INPUT_MOUSE&&(dx||dy)){
   double speed=cursor_speed*((fast_r2||fast_y)?2:1);
   cursor_x+=dx*speed*elapsed;cursor_y+=dy*speed*elapsed;
-  if(cursor_x<0)cursor_x=0;if(cursor_x>639)cursor_x=639;
-  if(cursor_y<0)cursor_y=0;if(cursor_y>479)cursor_y=479;
-  mx=(int)cursor_x;my=(int)cursor_y;if(motion)motion(d,-1,mx,my,0);
+  cursor_x=clamp_coordinate(cursor_x,fitted.x,fitted.width);
+  cursor_y=clamp_coordinate(cursor_y,fitted.y,fitted.height);
+  if(motion)motion(d,-1,map_coordinate(cursor_x,fitted.x,fitted.width,source.x,source.width),
+                       map_coordinate(cursor_y,fitted.y,fitted.height,source.y,source.height),0);
  }
  XFlush(d);
  int64_t read_start=clock_ns();
  XImage*i=capture_read(&capture);
  int64_t copy_start=clock_ns();
  if(i){
+ int rgb565=image_is_rgb565(i);
  unsigned render_y=double_buffer?(v.yoffset==0?v.yres:0):v.yoffset;
- if(i->bits_per_pixel==32&&v.red.offset==16&&v.green.offset==8&&v.blue.offset==0){
+ if(source.width!=SCREEN_WIDTH||source.height!=SCREEN_HEIGHT){
+  render_viewport(i,fb,&fi,&v,render_y,alpha,source,fitted);
+ }else if(i->bits_per_pixel==32&&v.xres>=SCREEN_WIDTH&&v.red.offset==16&&v.green.offset==8&&v.blue.offset==0){
  for(unsigned y=0;y<v.yres&&y<480;y++){
   uint32_t*out=(uint32_t*)(fb+(y+render_y)*fi.line_length+v.xoffset*4);
   const uint32_t*in=(const uint32_t*)(i->data+y*i->bytes_per_line);
@@ -187,8 +264,16 @@ int main(int argc,char**argv){
   if(alpha)for(int x=0;x<640;x++)out[x]=in[x]|alpha;
   else memcpy(out,in,640*4);
  }
+ }else if(rgb565&&v.xres>=SCREEN_WIDTH&&v.red.offset==16&&v.green.offset==8&&v.blue.offset==0){
+  for(unsigned y=0;y<v.yres&&y<480;y++){
+   uint32_t *out=(uint32_t*)(fb+(y+render_y)*fi.line_length+v.xoffset*4);
+   const uint16_t *in=(const uint16_t*)(i->data+y*i->bytes_per_line);
+   for(int x=0;x<SCREEN_WIDTH;x++)out[x]=alpha|rgb565_to_rgb888(in[x]);
+  }
  }else for(unsigned y=0;y<v.yres&&y<480;y++)for(unsigned x=0;x<v.xres&&x<640;x++){
- unsigned long p=XGetPixel(i,x,y);uint32_t q=alpha|((p>>16)&255)<<v.red.offset|((p>>8)&255)<<v.green.offset|(p&255)<<v.blue.offset;
+ unsigned long p=XGetPixel(i,x,y);
+ if(rgb565)p=rgb565_to_rgb888(p);
+ uint32_t q=alpha|((p>>16)&255)<<v.red.offset|((p>>8)&255)<<v.green.offset|(p&255)<<v.blue.offset;
  *((uint32_t*)(fb+(y+render_y)*fi.line_length+(x+v.xoffset)*4))=q;
  }
  if(banner_started){

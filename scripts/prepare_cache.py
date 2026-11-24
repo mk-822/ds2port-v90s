@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 root=Path(__file__).resolve().parents[1]
-subprocess.run([sys.executable,str(root/'scripts/fetch_dependencies.py')],check=True)
+subprocess.run([sys.executable,str(root/'scripts/fetch_dependencies.py'),'wine','box64','adlmidi'],check=True)
 cache=root/'bld/cache'
 target=cache/'wine10.tar'
 temporary=cache/'wine10.tar.building'

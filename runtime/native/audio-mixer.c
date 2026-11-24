@@ -23,6 +23,9 @@ static client clients[MIX_CLIENTS];
 static pthread_mutex_t mutex=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cond=PTHREAD_COND_INITIALIZER;
 #define OUTPUT_BLOCKS 8
+#define OUTPUT_RETRY_LIMIT_MS 40
+#define OUTPUT_LATENCY_US 80000
+#define OUTPUT_PRIME_FRAMES (4 * MIX_PERIOD)
 static int16_t output[OUTPUT_BLOCKS][MIX_PERIOD][2];static unsigned head,tail;static const char*device;
 static void notify(client*c){uint64_t one=1;int rc=write(c->event,&one,8);(void)rc;}
 static void remove_client(client*c){
@@ -66,19 +69,32 @@ static void mix_block(void){
 }
 static void*playback(void*unused){
  (void)unused;
+ static const int16_t silence[OUTPUT_PRIME_FRAMES][2];
  snd_pcm_t*pcm=NULL;unsigned long frames=0;int16_t block[MIX_PERIOD][2];
  while(running){
   pthread_mutex_lock(&mutex);while(running&&head==tail)pthread_cond_wait(&cond,&mutex);
   if(!running){pthread_mutex_unlock(&mutex);break;}memcpy(block,output[tail++%OUTPUT_BLOCKS],sizeof(block));pthread_mutex_unlock(&mutex);
-  if(!pcm){int rc=snd_pcm_open(&pcm,device,SND_PCM_STREAM_PLAYBACK,0);
-   if(rc>=0)rc=snd_pcm_set_params(pcm,SND_PCM_FORMAT_S16_LE,SND_PCM_ACCESS_RW_INTERLEAVED,2,48000,1,40000);
+  // A stalled hotplug PCM can keep reporting writable while making no
+  // progress. A blocking write can then spin indefinitely inside ALSA.
+  if(!pcm){int rc=snd_pcm_open(&pcm,device,SND_PCM_STREAM_PLAYBACK,SND_PCM_NONBLOCK);
+   if(rc>=0)rc=snd_pcm_set_params(pcm,SND_PCM_FORMAT_S16_LE,SND_PCM_ACCESS_RW_INTERLEAVED,2,48000,1,OUTPUT_LATENCY_US);
    if(rc<0){fprintf(stderr,"MIX_OUTPUT_OPEN %s\n",snd_strerror(rc));if(pcm)snd_pcm_close(pcm);pcm=NULL;usleep(20000);continue;}
    fprintf(stderr,"MIX_OUTPUT_READY rate=48000\n");
+   // The physical device can start after one period. Queue several periods
+   // before the first timed write so late mixer ticks don't empty its buffer.
+   snd_pcm_sframes_t primed=snd_pcm_writei(pcm,silence,OUTPUT_PRIME_FRAMES);
+   if(primed<0)fprintf(stderr,"MIX_OUTPUT_PRIME %s\n",snd_strerror(primed));
   }
-  int offset=0;while(running&&offset<MIX_PERIOD){
+  int offset=0, retries=0;while(running&&offset<MIX_PERIOD){
    snd_pcm_sframes_t n=snd_pcm_writei(pcm,block[offset],MIX_PERIOD-offset);
-   if(n==-EPIPE||n==-ESTRPIPE){int rc=snd_pcm_recover(pcm,n,1);if(rc>=0)continue;}
-   if(n<=0){fprintf(stderr,"MIX_OUTPUT_REOPEN %ld\n",(long)n);snd_pcm_drop(pcm);snd_pcm_close(pcm);pcm=NULL;usleep(10000);break;}
+   if((n==0||n==-EAGAIN||n==-EINTR)&&retries++<OUTPUT_RETRY_LIMIT_MS){
+    usleep(1000);
+    continue;
+   }
+   if(n<=0){
+    fprintf(stderr,"MIX_OUTPUT_REOPEN %s\n",n==0?"No playback progress":snd_strerror(n));
+    snd_pcm_drop(pcm);snd_pcm_close(pcm);pcm=NULL;usleep(10000);break;
+   }
    offset+=n;frames+=n;
   }
  }

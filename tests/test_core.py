@@ -58,6 +58,78 @@ class RuntimeReuse(unittest.TestCase):
             self.assertFalse(remote.same_tree(source, destination))
 
 
+class InstalledPorts(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name)
+        self.ports, self.runtimes = base / 'ports', base / 'runtimes'
+        self.ports.mkdir()
+        self.runtimes.mkdir()
+        mountinfo = base / 'mountinfo'
+        mountinfo.touch()
+        paths = patch.multiple(remote, PORTS=self.ports, RUNTIMES=self.runtimes,
+                               DISPLAY_LOCK=base / 'display.lock', DISPLAY_SOCKET=base / 'X93',
+                               MOUNTINFO=mountinfo)
+        paths.start()
+        self.addCleanup(paths.stop)
+
+    def add_legacy_port(self):
+        port, runtime = self.ports / 'game', self.runtimes / 'game'
+        port.mkdir()
+        runtime.mkdir()
+        (port / 'ds2port-installed.json').write_text('{}')
+        launcher = self.ports / 'ゲーム.sh'
+        launcher.write_bytes(b'#!/bin/sh\nexec /mnt/plumos/roms/ports/game/launch.sh "$@"\n')
+        return port, runtime, launcher
+
+    def test_legacy_installation_can_be_removed_without_touching_other_ports(self):
+        port, runtime, launcher = self.add_legacy_port()
+        (port / 'save.dat').touch()
+        unrelated = self.ports / 'Other.sh'
+        unrelated.touch()
+        shared = self.runtimes / '.shared'
+        shared.mkdir()
+        self.assertEqual(remote.installed_ports(), [{'port_id': 'game', 'launcher': launcher.name}])
+        remote.uninstall('game')
+        self.assertEqual(remote.installed_ports(), [])
+        self.assertTrue(shared.is_dir())
+        self.assertTrue(unrelated.is_file())
+        for removed in (launcher, port, runtime):
+            self.assertFalse(removed.exists())
+
+    def test_interrupted_removal_can_retry_after_game_directory_is_gone(self):
+        port, runtime, launcher = self.add_legacy_port()
+        (runtime / 'backups').mkdir()
+        rmtree = remote.shutil.rmtree
+
+        def fail_backups(path):
+            if path.name == 'backups':
+                raise OSError('interrupted')
+            return rmtree(path)
+
+        with patch.object(remote.shutil, 'rmtree', side_effect=fail_backups):
+            with self.assertRaisesRegex(OSError, 'interrupted'):
+                remote.uninstall('game')
+        self.assertFalse(port.exists())
+        self.assertTrue((runtime / 'installed.json').is_file())
+        self.assertEqual(remote.installed_ports(), [{'port_id': 'game', 'launcher': None}])
+        remote.uninstall('game')
+        self.assertFalse(runtime.exists())
+
+    def test_launcher_names_cannot_overwrite_another_port(self):
+        _, _, launcher = self.add_legacy_port()
+        unrelated = self.ports / 'Other.sh'
+        unrelated.touch()
+        self.assertEqual(remote.existing_launchers('game', '別名.sh'), [launcher])
+        with self.assertRaises(ValueError):
+            remote.existing_launchers('game', 'other.sh')
+        for name in ('../bad.sh', '.hidden.sh', 'bad?.sh', '.sh', 'bad\n.sh'):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                remote.validate_launcher(name)
+        remote.validate_launcher("ゲーム '特別版'.sh")
+
+
 class RuntimeSharing(unittest.TestCase):
     def test_identical_wine_files_share_but_atomic_upgrade_is_private(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -141,6 +213,98 @@ class ArchiveSafety(unittest.TestCase):
 
 
 class Profiles(unittest.TestCase):
+    def test_cho_ren_sha_payload_applies_rendering_and_pcm_compatibility(self):
+        profile = next(profile for profile in profiles() if profile['id'] == 'latest')
+        original = bytearray(self.common_fixture().ljust(0x47014, b'\0'))
+        original[0xc077:0xc07d] = bytes.fromhex('81 e1 ff 00 00 00')
+        original[0x4700e:0x47014] = bytes.fromhex('8d b0 91 00 00 00')
+        profile = profile | {'original_sha256': digest(original), 'patched_sha256': None}
+        sound = bytearray(0x14000)
+        sound[0x348f:0x3494] = bytes.fromhex('8b 44 24 04 a3')
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            source = folder / 'game'
+            source.mkdir()
+            (source / 'LATEST.exe').write_bytes(original)
+            (source / 'X68Sound.dll').write_bytes(sound)
+            font = folder / 'font'
+            font.write_bytes(b'fixture')
+            output = folder / 'payload.tar.gz'
+            with patch('ds2port.profiles.X68SOUND_ORIGINAL', digest(sound)), patch('ds2port.installer.cnc_ddraw', return_value=font), patch('ds2port.installer.windows_font', return_value=font), patch('ds2port.installer.font_shim', return_value=font), patch('ds2port.installer.audio_shim', return_value=font):
+                config = prepare_payload(source, font, profile, 'latest', output)
+            with tarfile.open(output) as archive:
+                executable = archive.extractfile('game/LATEST.exe').read()
+                self.assertEqual(executable[0xc077:0xc07d], bytes.fromhex('31 c9 90 90 90 90'))
+                self.assertEqual(struct.unpack_from('<I', executable, 0x47010)[0], 288)
+                updated = archive.extractfile('game/X68Sound.dll').read()
+                self.assertEqual(updated[0x348f:0x3494], bytes.fromhex('e9 7c 04 01 00'))
+                self.assertEqual(updated[0x13920:0x13924], bytes.fromhex('f0 0f b1 91'))
+                self.assertEqual(archive.extractfile('game/ddraw.dll').read(), font.read_bytes())
+                self.assertIn(b'renderer=gdi', archive.extractfile('game/ddraw.ini').read())
+                self.assertIn(b';ddraw=n,b', archive.extractfile('port/launch.sh').read())
+            self.assertEqual(config['replace_if_sha256'], {'x68sound.dll': digest(sound)})
+            self.assertEqual((source / 'X68Sound.dll').read_bytes(), sound)
+
+    def test_cj16_payload_uses_borderless_16bit_draw_path_and_enables_safe_flags(self):
+        profile = next(profile for profile in profiles() if profile['id'] == 'cj16')
+        offset = 0x7951c
+        original = bytearray(self.common_fixture().ljust(offset, b'\0') + bytes.fromhex('6a 00 66 8b'))
+        rectangles = [
+            (0x73737, 0x68, 465, 480), (0x73741, 0xb9, 545, 560),
+            (0x73746, 0xba, 15, 0), (0x7374b, 0xb8, 95, 80),
+            (0x73770, 0x68, 390, 480), (0x7377d, 0xb9, 470, 560),
+            (0x73782, 0xba, 90, 0), (0x73787, 0xb8, 170, 80),
+        ]
+        for position, opcode, old, _ in rectangles:
+            struct.pack_into('<BI', original, position, opcode, old)
+        windowed = original[:]
+        windowed[offset:offset + 2] = b'\xeb\x61'
+        profile = profile | {'original_sha256': digest(original), 'patched_sha256': None,
+                             'windowed_sha256': digest(patch_common(windowed))}
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            source = folder / 'game'
+            source.mkdir()
+            executable = source / 'CJ16.exe'
+            executable.write_bytes(original)
+            font = folder / 'font'
+            font.write_bytes(b'fixture')
+            output = folder / 'payload.tar.gz'
+            with patch('ds2port.installer.generaluser_gs_asset', return_value=font), patch('ds2port.installer.cnc_ddraw', return_value=font), patch('ds2port.installer.windows_font', return_value=font), patch('ds2port.installer.font_shim', return_value=font), patch('ds2port.installer.audio_shim', return_value=font):
+                config = prepare_payload(source, font, profile, 'cj16', output,
+                                         display_mode='16bit', midi_backend='generaluser-gs')
+                windowed_output = folder / 'windowed.tar.gz'
+                prepare_payload(source, font, profile, 'cj16', windowed_output, display_mode='windowed')
+                timgm_output = folder / 'timgm.tar.gz'
+                timgm = prepare_payload(source, font, profile, 'cj16', timgm_output, midi_backend='timgm6mb')
+            with tarfile.open(output) as archive:
+                updated = archive.extractfile('game/CJ16.exe').read()
+                self.assertEqual(updated[offset:offset + 2], bytes.fromhex('eb 18'))
+                for position, opcode, _, new in rectangles:
+                    self.assertEqual(struct.unpack_from('<BI', updated, position), (opcode, new))
+                self.assertEqual(archive.extractfile('game/CJ16.original.exe').read(), original)
+                self.assertIn(b'windowed=true', archive.extractfile('game/ddraw.ini').read())
+                self.assertIn(b';ddraw=n,b', archive.extractfile('port/launch.sh').read())
+                self.assertIn(b'export BOX64_DYNAREC_SAFEFLAGS=2', archive.extractfile('port/launch.sh').read())
+                self.assertIn(b'track_viewport=no', archive.extractfile('port/launch.sh').read())
+                self.assertEqual(archive.extractfile('port/midi-backend').read(), b'generaluser-gs\n')
+                self.assertEqual(archive.extractfile('port/assets/GeneralUser-GS.sf2').read(), font.read_bytes())
+                self.assertIn('port/licenses/GeneralUser-GS-LICENSE.txt', archive.getnames())
+            with tarfile.open(windowed_output) as archive:
+                self.assertEqual(archive.extractfile('game/CJ16.exe').read(), patch_common(windowed))
+                self.assertIn(b';ddraw=b', archive.extractfile('port/launch.sh').read())
+                self.assertIn(b'track_viewport=yes', archive.extractfile('port/launch.sh').read())
+                self.assertEqual(archive.extractfile('port/midi-backend').read(), b'opl3\n')
+                self.assertNotIn('port/assets/GeneralUser-GS.sf2', archive.getnames())
+            self.assertEqual(config['display_mode'], '16bit')
+            with tarfile.open(timgm_output) as archive:
+                self.assertEqual(archive.extractfile('port/midi-backend').read(), b'timgm6mb\n')
+                self.assertNotIn('port/assets/GeneralUser-GS.sf2', archive.getnames())
+            self.assertEqual(timgm['soundfont_bytes'], 0)
+            self.assertEqual(config['soundfont_bytes'], font.stat().st_size)
+            self.assertEqual(config['game_sha256'], digest(updated))
+            self.assertEqual(executable.read_bytes(), original)
+
     def test_all_input_modes_are_preserved_in_the_transfer_payload(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
@@ -154,12 +318,17 @@ class Profiles(unittest.TestCase):
                 for mode in ('mouse', 'joypad', 'keyboard'):
                     with self.subTest(mode=mode):
                         output = folder / (mode + '.tar.gz')
-                        config = prepare_payload(source, font, profile, 'fixture', output, input_mode=mode)
+                        name = '日本語のゲーム名' if mode == 'mouse' else None
+                        config = prepare_payload(source, font, profile, 'fixture', output, input_mode=mode, ports_name=name)
                         self.assertEqual(config['input_mode'], mode)
+                        self.assertEqual(config['launcher'], (name or 'fixture') + '.sh')
                         with tarfile.open(output) as archive:
                             self.assertEqual(archive.extractfile('port/input-mode').read(), (mode + '\n').encode())
                             self.assertEqual(archive.extractfile('port/runtime/dsound.dll').read(), font.read_bytes())
                             self.assertIn('port/configure_audio.py', archive.getnames())
+                            launcher = folder / 'launcher.sh'
+                            launcher.write_bytes(archive.extractfile('launcher.sh').read())
+                            self.assertEqual(remote.launcher_owner(launcher), 'fixture')
 
     def test_invalid_input_mode_does_not_create_payload(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -385,7 +554,7 @@ class Profiles(unittest.TestCase):
         with self.assertRaises(ValueError):patch_executable(b"unrecognized binary",profiles()[0])
 
     def test_templates_have_no_unresolved_tokens(self):
-        values={"PORT":"/mnt/plumos/roms/ports/jump3","RUNTIME":"/mnt/plumos/ports-runtime/jump3","EXE":"JUMP3.EXE"}
+        values={"PORT":"/mnt/plumos/roms/ports/jump3","RUNTIME":"/mnt/plumos/ports-runtime/jump3","EXE":"JUMP3.EXE","GAME_ENV":"","TRACK_VIEWPORT":"yes"}
         for p in (root()/"runtime/templates").glob("*.in"):
             self.assertNotIn(b"@@",render_template(p.name,values))
 

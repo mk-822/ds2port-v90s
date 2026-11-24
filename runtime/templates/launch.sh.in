@@ -4,36 +4,80 @@ P=@@PORT@@
 R=@@RUNTIME@@
 C=$R/port
 . "$C/env.sh"
+backend=$(cat "$C/midi-backend" 2>/dev/null || echo opl3)
+soundfont=
+case "$backend" in
+ opl3) ;;
+ soundfont|timgm6mb) soundfont="$C/assets/TimGM6mb.sf2" ;;
+ generaluser-gs) soundfont="$C/assets/GeneralUser-GS.sf2" ;;
+ *) echo "Unknown MIDI backend: $backend"; exit 1 ;;
+esac
+if [ -n "$soundfont" ]; then
+ for f in "$soundfont" "$R/native/bin/midisynth"; do
+  [ -f "$f" ] || { echo "Missing $backend dependency: $f"; exit 1; }
+ done
+fi
+midi_libs=
+setup_midi(){
+ midi_libs=$(mktemp -d /tmp/ds2port-midi.XXXXXX) || return 1
+ python3 "$C/configure_midi.py" "$midi_libs"
+}
+cleanup_midi(){
+ if [ -n "$midi_libs" ]; then
+  rm -f "$midi_libs"/lib*.so.*
+  rmdir "$midi_libs"
+ fi
+}
 if [ "${1:-}" = --check ]; then
  for f in "$P/game/"@@EXE@@ "$W/bin/wine" "$C/runtime/box64" "$C/runtime/dsfont.dll" "$C/runtime/dsound.dll" "$R/native/bin/Xvfb" "$R/native/bin/fbbridge" "$R/native/bin/sb16-synth" "$R/native/bin/audio-mixer" "$R/native/lib/libasound_module_pcm_ds2port_mix.so" "$C/assets/fonts/msgothic.ttc"; do
   [ -f "$f" ] || { echo "Missing: $f"; exit 1; }
  done
+ if [ -n "$soundfont" ]; then
+  trap cleanup_midi EXIT
+  setup_midi || exit 1
+ fi
  echo 'DS2PORT_RUNTIME_OK'
  exit 0
 fi
 lock=/run/plumos/ds2port-display93.lock
 mkdir "$lock" 2>/dev/null || { echo 'Another DS2Port game is running'; exit 1; }
 xpid=;spid=;bpid=;gpid=;apid=
+prefix_active=0
+stop_wine(){
+ timeout -k 2 10 "$R/wineserver-wrapper" -k >/dev/null 2>&1 || true
+ timeout -k 2 15 "$R/wineserver-wrapper" -w >/dev/null 2>&1
+}
 cleanup(){
  trap - EXIT HUP INT TERM
- timeout 5 "$R/wineserver-wrapper" -k >/dev/null 2>&1 || true
- timeout 10 "$R/wineserver-wrapper" -w >/dev/null 2>&1 || true
- for pid in "$gpid" "$bpid" "$spid" "$xpid" "$apid"; do
+ # Stop the Wine launcher before requesting server shutdown. Otherwise a
+ # launcher still starting the game can race the server shutdown request.
+ if [ -n "$gpid" ]; then
+  kill "$gpid" 2>/dev/null || true
+ fi
+ if [ "$prefix_active" = 1 ] && ! stop_wine; then
+  echo 'WINE_CLEANUP_RETRY'
+  stop_wine || echo 'WINE_CLEANUP_FAILED'
+ fi
+ for pid in "$bpid" "$spid" "$xpid" "$apid"; do
   [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
  done
- if [ -n "$apid" ]; then
-  wait "$apid" || true
-  rm -f "$R/audio.pid"
- fi
+ for pid in "$gpid" "$bpid" "$spid" "$xpid" "$apid"; do
+  [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+ done
+ rm -f "$R/audio.pid"
  rm -f "$R/game.pid" "$R/bridge.pid" "$R/synth.pid" "$R/xvfb.pid"
- rm -f "$R/bridge.ready"
- [ ! -d "$S" ] || python3 "$C/prefix_storage.py" unmount "$S" || true
+ rm -f "$R/bridge.ready" "$R/viewport" "$R/viewport.new"
+ cleanup_midi
+ if [ "$prefix_active" = 1 ]; then
+  python3 "$C/prefix_storage.py" unmount "$S" || echo 'PREFIX_UNMOUNT_FAILED'
+ fi
  rmdir "$lock" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'exit 0' HUP INT TERM
 [ ! -d "$R/.ds2port-install.lock" ] || { echo "DS2Port installation is in progress"; exit 1; }
 python3 "$C/common_prefix.py" "$R" || exit 1
+prefix_active=1
 python3 "$C/prefix_storage.py" ensure "$S" || exit 1
 # Keep the OS cache/registry writable, including Wineboot's first-run growth.
 python3 - "$S" <<'PY' || exit 1
@@ -77,7 +121,15 @@ if [ "$(cat "$C/audio-output-mode")" = shared-mixer ]; then
 fi
 mkdir -p /tmp/.X11-unix
 ln -sfn "$R/native/bin" /tmp/j3b
-Xvfb :93 -screen 0 640x480x24 -xkbdir "$XKB_CONFIG_ROOT" -ac -nolisten tcp -noreset >> "$R/logs/xvfb.log" 2>&1 &
+track_viewport=@@TRACK_VIEWPORT@@
+display_depth=24
+# CJ16's fixed viewport uses an RGB565 DirectDraw surface. Match it in Xvfb
+# when the native bridge can convert RGB565 to the panel's 32-bit format.
+if [ "$track_viewport" = no ] && [ -f "$R/native/share/xvfb-rgb565" ]; then
+ display_depth=16
+fi
+echo "XVFB_DISPLAY_DEPTH=$display_depth"
+Xvfb :93 -screen 0 "640x480x$display_depth" -xkbdir "$XKB_CONFIG_ROOT" -ac -nolisten tcp -noreset >> "$R/logs/xvfb.log" 2>&1 &
 xpid=$!; echo "$xpid" > "$R/xvfb.pid"
 ready=0
 for i in $(seq 1 10); do
@@ -85,8 +137,8 @@ for i in $(seq 1 10); do
  sleep 1
 done
 [ "$ready" = 1 ] || { echo 'Xvfb failed'; exit 1; }
-rm -f "$R/bridge.ready"
-DS2PORT_BRIDGE_READY="$R/bridge.ready" fbbridge >> "$R/logs/framebuffer.log" 2>&1 &
+rm -f "$R/bridge.ready" "$R/viewport" "$R/viewport.new"
+DS2PORT_BRIDGE_READY="$R/bridge.ready" DS2PORT_VIEWPORT_FILE="$R/viewport" fbbridge >> "$R/logs/framebuffer.log" 2>&1 &
 bpid=$!; echo "$bpid" > "$R/bridge.pid"
 for i in $(seq 1 30); do
  [ -f "$R/bridge.ready" ] && break
@@ -100,8 +152,7 @@ if ! cmp -s "$C/assets/fonts/msgothic.ttc" "$WINEPREFIX/drive_c/windows/Fonts/ms
 fi
 if [ ! -f "$S/prefix-configured-v2" ] || [ ! -f "$WINEPREFIX/system.reg" ] || [ ! -f "$WINEPREFIX/user.reg" ]; then
  wine_run wineboot.exe --init >> "$R/logs/prefix.log" 2>&1 || true
- timeout 10 "$R/wineserver-wrapper" -k >/dev/null 2>&1 || true
- timeout 10 "$R/wineserver-wrapper" -w >/dev/null 2>&1 || { echo 'Wine initialization did not stop'; exit 1; }
+ stop_wine || { echo 'Wine initialization did not stop'; exit 1; }
  python3 "$C/configure_prefix.py" "$WINEPREFIX" >> "$R/logs/prefix.log" 2>&1 || { echo 'Japanese prefix setup failed'; exit 1; }
  touch "$S/prefix-configured-v2"
 fi
@@ -117,17 +168,36 @@ audio_dll="$WINEPREFIX/drive_c/windows/syswow64/dsound.dll"
 if ! cmp -s "$C/runtime/dsound.dll" "$audio_dll"; then
  cp "$C/runtime/dsound.dll" "$audio_dll.ds2port-new" && mv "$audio_dll.ds2port-new" "$audio_dll" || exit 1
 fi
-backend=$(cat "$C/midi-backend" 2>/dev/null || echo opl3)
-if [ "$backend" = soundfont ]; then
- ALSA_CONFIG_PATH="$C/asound-fm.conf" midisynth "$C/assets/TimGM6mb.sf2" >> "$R/logs/midi.log" 2>&1 &
+midi_log="$R/logs/midi.log"
+touch "$midi_log" || exit 1
+midi_start=$(wc -c < "$midi_log") || exit 1
+echo "MIDI_BACKEND=$backend" >> "$midi_log"
+if [ -n "$soundfont" ]; then
+ setup_midi || exit 1
+ LD_LIBRARY_PATH="$midi_libs:$LD_LIBRARY_PATH" ALSA_CONFIG_PATH="$C/asound-fm.conf" \
+  midisynth "$soundfont" >> "$midi_log" 2>&1 &
 else
- ALSA_CONFIG_PATH="$C/asound-fm.conf" sb16-synth >> "$R/logs/midi.log" 2>&1 &
+ ALSA_CONFIG_PATH="$C/asound-fm.conf" sb16-synth >> "$midi_log" 2>&1 &
 fi
 spid=$!; echo "$spid" > "$R/synth.pid"
-sleep 1
-kill -0 "$spid" 2>/dev/null || { echo 'MIDI synth failed'; exit 1; }
-cd "$P/game"
-wine_run @@EXE@@ >> "$R/logs/game.log" 2>&1 &
+midi_ready=0
+for i in $(seq 1 100); do
+ kill -0 "$spid" 2>/dev/null || { echo "MIDI synth failed: $backend (see midi.log)"; exit 1; }
+ if tail -c "+$((midi_start + 1))" "$midi_log" | grep -q '^MIDI_SYNTH_READY'; then
+  midi_ready=1
+  break
+ fi
+ sleep .1
+done
+[ "$midi_ready" = 1 ] || { echo "MIDI synth did not become ready: $backend"; exit 1; }
+cd "$P/game" || exit 1
+@@GAME_ENV@@
+if [ "$track_viewport" = yes ] && [ -f "$R/native/window-runner.exe" ]; then
+ DS2PORT_VIEWPORT="Z:$R/viewport" "$C/runtime/box64" "$W/bin/wine" "Z:$R/native/window-runner.exe" @@EXE@@ >> "$R/logs/game.log" 2>&1 &
+else
+ [ "$track_viewport" = no ] || echo 'Virtual fullscreen requires an updated runtime bundle.'
+ "$C/runtime/box64" "$W/bin/wine" @@EXE@@ >> "$R/logs/game.log" 2>&1 &
+fi
 gpid=$!; echo "$gpid" > "$R/game.pid"
 while kill -0 "$gpid" 2>/dev/null && kill -0 "$bpid" 2>/dev/null; do sleep 1; done
 echo "DS2Port stopped $(date -u)"
